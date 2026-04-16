@@ -97,6 +97,140 @@
 & "d:\New_Project\AI_Project\MoneyAPP\.venv\Scripts\python.exe" -m pytest backend\tests
 ```
 
+## 腾讯云 CVM 部署
+
+当前后端已经按 `Ubuntu 22.04 + 公网 IP + HTTP` 方案验证通过，可直接部署到腾讯云 CVM。
+
+### 服务器环境
+
+- 系统：`Ubuntu 22.04`
+- Python：`3.10.x`
+- 运行方式：`uvicorn`
+- 进程托管：`systemd`
+- 当前公网访问方式：`http://公网IP:8000/`
+
+### 安装基础依赖
+
+在腾讯云服务器上执行：
+
+```bash
+sudo apt update
+sudo apt install -y git python3 python3-venv python3-pip
+```
+
+创建虚拟环境：
+
+```bash
+python3 -m venv ~/moneyapp-venv
+source ~/moneyapp-venv/bin/activate
+```
+
+### 拉取代码并安装依赖
+
+首次部署：
+
+```bash
+cd ~
+git clone https://github.com/zzy8226614/MoneyApp.git
+cd ~/MoneyApp
+source ~/moneyapp-venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r backend/requirements.txt
+```
+
+### 临时启动后端
+
+```bash
+cd ~/MoneyApp
+source ~/moneyapp-venv/bin/activate
+python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
+```
+
+### 健康检查
+
+服务器本机检查：
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+若正常，返回：
+
+```json
+{"status":"ok"}
+```
+
+浏览器公网检查：
+
+```text
+http://公网IP:8000/health
+```
+
+### 腾讯云安全组
+
+至少放通以下入站规则：
+
+- `TCP 22`：SSH 登录
+- `TCP 8000`：当前阶段临时对外访问 FastAPI 后端
+
+### systemd 常驻服务
+
+服务文件：
+
+```ini
+[Unit]
+Description=MoneyAPP FastAPI Backend
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/MoneyApp
+Environment="PATH=/home/ubuntu/moneyapp-venv/bin"
+ExecStart=/home/ubuntu/moneyapp-venv/bin/python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+创建与启用：
+
+```bash
+sudo nano /etc/systemd/system/moneyapp.service
+sudo systemctl daemon-reload
+sudo systemctl enable moneyapp
+sudo systemctl start moneyapp
+```
+
+### 日常运维命令
+
+```bash
+sudo systemctl status moneyapp
+sudo systemctl restart moneyapp
+sudo systemctl stop moneyapp
+sudo journalctl -u moneyapp -f
+```
+
+### 更新服务器代码
+
+后续 GitHub 有新代码时，在服务器上执行：
+
+```bash
+cd ~/MoneyApp
+git pull origin main
+source ~/moneyapp-venv/bin/activate
+pip install -r backend/requirements.txt
+sudo systemctl restart moneyapp
+```
+
+### 手机 App 联调
+
+- 首页后端地址改成：`http://公网IP:8000/`
+- 先点 `情绪信号`
+- 再点 `一进二选股`、`弱转强选股`、`Top5 推荐`
+- 若页面显示旧结果，优先在结果页点击 `刷新`，避免命中 `2` 小时客户端缓存
+
 ## Android APK 运行
 
 当前仓库已经提供可直接构建并安装到 Android 手机的工程目录：`android-app/`
