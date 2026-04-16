@@ -7,6 +7,7 @@ import kotlinx.serialization.Serializable
 data class ScreeningRequest(
     @SerialName("trade_date") val tradeDate: String? = null,
     @SerialName("use_demo_on_failure") val useDemoOnFailure: Boolean = true,
+    @SerialName("force_refresh") val forceRefresh: Boolean = false,
 )
 
 @Serializable
@@ -24,13 +25,15 @@ data class ScreeningItem(
     val stockName: String,
     val symbol: String,
     val floatMarketCap: String,
+    val boardName: String,
+    val boardRank: Int = 0,
+    val boardLimitUpCount: Int,
     val turnoverRate: String,
     val sealTime: String,
-    val sealAmountOrLots: String,
-    val limitUpDriver: String,
-    val boardName: String,
-    val boardLimitUpCount: Int,
-    val totalScore: Double,
+    val sealOrderLots: String = "--",
+    val openBoardCount: Int = 0,
+    val totalScore: Double? = null,
+    val isLimitUp: Boolean = true,
     val strategyTag: String,
     val recommendReason: String,
 )
@@ -43,8 +46,31 @@ data class ScreeningResponse(
     val error: String? = null,
 )
 
+@Serializable
+data class MarketSignalIndicator(
+    val name: String,
+    val todayValue: String,
+    val standard: String,
+    val status: String,
+)
+
+@Serializable
+data class MarketSignalResponse(
+    @SerialName("trade_date") val tradeDate: String,
+    val weekday: String,
+    val marketOverview: String,
+    val turnoverOverview: String,
+    val regime: String,
+    val regimeLabel: String,
+    val positionAdvice: String,
+    val indicators: List<MarketSignalIndicator> = emptyList(),
+    val notes: List<String> = emptyList(),
+    val error: String? = null,
+)
+
 enum class ScreenDestination {
     HOME,
+    MARKET_SIGNAL,
     FIRST_BOARD,
     WEAK_TO_STRONG,
     TOP5,

@@ -1,7 +1,9 @@
 package com.moneyapp.screener.ui
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.moneyapp.screener.model.MarketSignalResponse
 import com.moneyapp.screener.model.ScreenDestination
 import com.moneyapp.screener.model.ScreeningResponse
 import com.moneyapp.screener.repository.ScreeningRepository
@@ -17,14 +19,14 @@ data class UiState(
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
     val currentScreen: ScreenDestination = ScreenDestination.HOME,
+    val marketSignalResponse: MarketSignalResponse? = null,
     val firstBoardResponse: ScreeningResponse? = null,
     val weakToStrongResponse: ScreeningResponse? = null,
     val top5Response: ScreeningResponse? = null,
 )
 
-class ScreeningViewModel(
-    private val repository: ScreeningRepository = ScreeningRepository(),
-) : ViewModel() {
+class ScreeningViewModel(application: Application) : AndroidViewModel(application) {
+    private val repository = ScreeningRepository.create(application)
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
@@ -44,17 +46,61 @@ class ScreeningViewModel(
         load(
             destination = ScreenDestination.FIRST_BOARD,
             block = { state ->
-                repository.loadFirstBoard(state.baseUrl.trim(), state.tradeDate.trim())
+                repository.loadFirstBoard(
+                    baseUrl = state.baseUrl.trim(),
+                    tradeDate = state.tradeDate.trim(),
+                    forceRefresh = false,
+                )
             },
             onSuccess = { state, response -> state.copy(firstBoardResponse = response) },
         )
+    }
+
+    fun refreshFirstBoard() {
+        load(
+            destination = ScreenDestination.FIRST_BOARD,
+            block = { state ->
+                repository.loadFirstBoard(
+                    baseUrl = state.baseUrl.trim(),
+                    tradeDate = state.tradeDate.trim(),
+                    forceRefresh = true,
+                )
+            },
+            onSuccess = { state, response -> state.copy(firstBoardResponse = response) },
+        )
+    }
+
+    fun loadMarketSignal() {
+        loadMarketSignalInternal(forceRefresh = false)
+    }
+
+    fun refreshMarketSignal() {
+        loadMarketSignalInternal(forceRefresh = true)
     }
 
     fun loadWeakToStrong() {
         load(
             destination = ScreenDestination.WEAK_TO_STRONG,
             block = { state ->
-                repository.loadWeakToStrong(state.baseUrl.trim(), state.tradeDate.trim())
+                repository.loadWeakToStrong(
+                    baseUrl = state.baseUrl.trim(),
+                    tradeDate = state.tradeDate.trim(),
+                    forceRefresh = false,
+                )
+            },
+            onSuccess = { state, response -> state.copy(weakToStrongResponse = response) },
+        )
+    }
+
+    fun refreshWeakToStrong() {
+        load(
+            destination = ScreenDestination.WEAK_TO_STRONG,
+            block = { state ->
+                repository.loadWeakToStrong(
+                    baseUrl = state.baseUrl.trim(),
+                    tradeDate = state.tradeDate.trim(),
+                    forceRefresh = true,
+                )
             },
             onSuccess = { state, response -> state.copy(weakToStrongResponse = response) },
         )
@@ -64,17 +110,31 @@ class ScreeningViewModel(
         load(
             destination = ScreenDestination.TOP5,
             block = { state ->
-                repository.loadTop5(state.baseUrl.trim(), state.tradeDate.trim())
+                repository.loadTop5(
+                    baseUrl = state.baseUrl.trim(),
+                    tradeDate = state.tradeDate.trim(),
+                    forceRefresh = false,
+                )
             },
             onSuccess = { state, response -> state.copy(top5Response = response) },
         )
     }
 
-    private fun load(
-        destination: ScreenDestination,
-        block: suspend (UiState) -> ScreeningResponse,
-        onSuccess: (UiState, ScreeningResponse) -> UiState,
-    ) {
+    fun refreshTop5() {
+        load(
+            destination = ScreenDestination.TOP5,
+            block = { state ->
+                repository.loadTop5(
+                    baseUrl = state.baseUrl.trim(),
+                    tradeDate = state.tradeDate.trim(),
+                    forceRefresh = true,
+                )
+            },
+            onSuccess = { state, response -> state.copy(top5Response = response) },
+        )
+    }
+
+    private fun loadMarketSignalInternal(forceRefresh: Boolean) {
         viewModelScope.launch {
             val current = _uiState.value
             _uiState.update {
@@ -83,13 +143,19 @@ class ScreeningViewModel(
                     errorMessage = null,
                 )
             }
-            runCatching { block(current) }
-                .onSuccess { response ->
+            runCatching {
+                repository.loadMarketSignal(
+                    baseUrl = current.baseUrl.trim(),
+                    tradeDate = current.tradeDate.trim(),
+                    forceRefresh = forceRefresh,
+                )
+            }.onSuccess { result ->
                     _uiState.update {
-                        onSuccess(it, response).copy(
-                            currentScreen = destination,
+                        it.copy(
+                            marketSignalResponse = result.response.withCacheNote(result.fromCache),
+                            currentScreen = ScreenDestination.MARKET_SIGNAL,
                             isLoading = false,
-                            errorMessage = response.error,
+                            errorMessage = result.response.error,
                         )
                     }
                 }
@@ -103,4 +169,54 @@ class ScreeningViewModel(
                 }
         }
     }
+
+    private fun load(
+        destination: ScreenDestination,
+        block: suspend (UiState) -> ScreeningRepository.LoadResult<ScreeningResponse>,
+        onSuccess: (UiState, ScreeningResponse) -> UiState,
+    ) {
+        viewModelScope.launch {
+            val current = _uiState.value
+            _uiState.update {
+                it.copy(
+                    isLoading = true,
+                    errorMessage = null,
+                )
+            }
+            runCatching { block(current) }
+                .onSuccess { result ->
+                    _uiState.update {
+                        onSuccess(it, result.response.withCacheNote(result.fromCache)).copy(
+                            currentScreen = destination,
+                            isLoading = false,
+                            errorMessage = result.response.error,
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            errorMessage = error.message ?: "请求失败，请检查后端服务地址。",
+                        )
+                    }
+                }
+        }
+    }
+}
+
+private fun MarketSignalResponse.withCacheNote(fromCache: Boolean): MarketSignalResponse {
+    if (!fromCache) return this
+    val cacheNote = "显示缓存数据（2小时内）。"
+    return copy(notes = listOf(cacheNote) + notes.filterNot { it == cacheNote })
+}
+
+private fun ScreeningResponse.withCacheNote(fromCache: Boolean): ScreeningResponse {
+    if (!fromCache) return this
+    val cacheNote = "显示缓存数据（2小时内）。"
+    return copy(
+        marketSummary = marketSummary.copy(
+            notes = listOf(cacheNote) + marketSummary.notes.filterNot { it == cacheNote },
+        ),
+    )
 }

@@ -1,17 +1,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 import pandas as pd
 
 from ..data.sample_data import build_demo_first_board, build_demo_weak_to_strong
-from ..models.schemas import MarketSummary, ScreeningItem, ScreeningResponse
+from ..models.schemas import (
+    MarketSignalIndicator,
+    MarketSignalResponse,
+    MarketSummary,
+    ScreeningItem,
+    ScreeningResponse,
+)
 from .akshare_service import AkshareDataService, MarketDataset
 
 
 @dataclass
 class CandidateContext:
     board_counts: dict[str, int]
+    board_ranks: dict[str, int]
     board_strength: dict[str, float]
     board_drivers: dict[str, str]
 
@@ -146,6 +154,85 @@ class ScreenerService:
             error=None,
         )
 
+    def build_market_signal(self, trade_date: str | None, use_demo_on_failure: bool) -> MarketSignalResponse:
+        try:
+            dataset = self.data_service.get_market_dataset(trade_date)
+            limit_down_pool = self.data_service.get_limit_down_pool(trade_date)
+            market_snapshot = self.data_service.get_market_overview(trade_date)
+
+            limit_up_count = int(len(dataset.limit_up_pool.index))
+            highest_board_row = self._highest_board_row(dataset.limit_up_pool)
+            highest_board = int(self._to_float(highest_board_row.get("连板数")))
+            highest_board_name = str(highest_board_row.get("名称", "--")).strip() or "--"
+            promotion_rate, promotion_desc = self._promotion_rate(dataset)
+            limit_down_count = int(len(limit_down_pool.index))
+            has_limit_down_wave = limit_down_count > limit_up_count if limit_up_count > 0 else limit_down_count > 0
+
+            regime = self._market_regime(
+                limit_up_count=limit_up_count,
+                highest_board=highest_board,
+                promotion_rate=promotion_rate,
+                has_limit_down_wave=has_limit_down_wave,
+            )
+            weekday = self._weekday_label(dataset.trade_date)
+            indicators = [
+                MarketSignalIndicator(
+                    name="涨停家数",
+                    todayValue=f"{limit_up_count}家（不含ST/退市）",
+                    standard=">60（绿灯）/ 40-60（黄灯）/ <40（红灯）",
+                    status=self._limit_up_status(limit_up_count),
+                ),
+                MarketSignalIndicator(
+                    name="最高连板",
+                    todayValue=f"{highest_board}板（{highest_board_name}）" if highest_board > 0 else "--",
+                    standard="≥5（绿灯）/ ≥4（黄灯）",
+                    status=self._highest_board_status(highest_board),
+                ),
+                MarketSignalIndicator(
+                    name="连板晋级率",
+                    todayValue=promotion_desc,
+                    standard=">25%（绿灯）/ ≤25%（黄灯）",
+                    status=self._promotion_status(promotion_rate),
+                ),
+                MarketSignalIndicator(
+                    name="跌停潮",
+                    todayValue=f"{limit_down_count}只跌停，{'跌停家数已超过涨停家数' if has_limit_down_wave else '未超过涨停家数'}",
+                    standard="跌停家数不高于涨停家数",
+                    status="红灯" if has_limit_down_wave else "绿灯",
+                ),
+            ]
+            notes = list(market_snapshot.notes)
+            if dataset.board_snapshot.empty:
+                notes.append("板块快照暂不可用，板块排名采用涨停家数排序。")
+            return MarketSignalResponse(
+                trade_date=dataset.trade_date,
+                weekday=weekday,
+                marketOverview=market_snapshot.market_overview,
+                turnoverOverview=market_snapshot.turnover_overview,
+                regime=regime,
+                regimeLabel=self._regime_label(regime),
+                positionAdvice=self._position_advice(regime),
+                indicators=indicators,
+                notes=notes,
+                error=None,
+            )
+        except Exception as exc:
+            if use_demo_on_failure:
+                normalized_date = self._normalize_date(trade_date)
+                return MarketSignalResponse(
+                    trade_date=normalized_date,
+                    weekday=self._weekday_label(normalized_date),
+                    marketOverview="指数行情数据暂不可用，已切换为情绪指标降级展示。",
+                    turnoverOverview="成交额暂不可用。",
+                    regime="YELLOW",
+                    regimeLabel="黄灯",
+                    positionAdvice="黄灯 + 一进二：仓位上限 40%，强制分仓两只各 20%。",
+                    indicators=[],
+                    notes=["Akshare unavailable, using bundled fallback market signal."],
+                    error=None,
+                )
+            raise RuntimeError(f"Failed to build market signal: {exc}") from exc
+
     def _build_first_board_items(self, dataset: MarketDataset) -> ScreeningBuildResult:
         if dataset.limit_up_pool.empty:
             return ScreeningBuildResult(items=[], notes=[])
@@ -155,20 +242,11 @@ class ScreenerService:
             return ScreeningBuildResult(items=[], notes=[])
         frame = frame[frame["连板数"].fillna(0).astype(int) == 1]
         items: list[ScreeningItem] = []
-        history_filter_skipped_count = 0
         for _, row in frame.iterrows():
             item, history_filter_skipped = self._screen_first_board_row(row, dataset.trade_date, context)
             if item is not None:
                 items.append(item)
-            if history_filter_skipped:
-                history_filter_skipped_count += 1
-        notes: list[str] = []
-        if history_filter_skipped_count > 0:
-            notes.append(
-                f"Historical daily data was unavailable for {history_filter_skipped_count} candidates; "
-                "the 250-day trend filter was skipped for those stocks."
-            )
-        return ScreeningBuildResult(items=items, notes=notes)
+        return ScreeningBuildResult(items=items, notes=[])
 
     def _build_weak_to_strong_items(self, dataset: MarketDataset) -> ScreeningBuildResult:
         if dataset.limit_up_pool.empty:
@@ -209,37 +287,40 @@ class ScreenerService:
             history_filter_skipped = True
 
         turnover = self._to_float(row.get("换手率"))
-        seal_amount_yi = self._to_yi(row.get("封板资金"))
+        seal_funds = self._to_float(row.get("封板资金"))
         board_name = self._board_name(row)
         board_count = context.board_counts.get(board_name, 0)
+        board_rank = context.board_ranks.get(board_name, 0)
         seal_time = self._format_time(row.get("首次封板时间"))
-        limit_up_driver = self._limit_up_driver(row, context)
+        latest_price = self._to_float(row.get("最新价"))
+        seal_order_lots = self._format_seal_order_lots(seal_funds, latest_price)
+        open_board_count = int(self._to_float(row.get("炸板次数")))
 
         score = 0.0
         score += self._score_first_limit_time(seal_time)
         score += self._score_turnover(turnover)
-        score += self._score_seal_amount(seal_amount_yi)
+        score += self._score_seal_amount(self._to_yi(seal_funds))
         score += self._score_board_synergy(board_count)
 
         if score < 21:
             return None, history_filter_skipped
 
-        reason = f"首板评分 {round(score, 1)} 分，驱动 {limit_up_driver}，{board_name} 板块涨停 {board_count} 家。"
-        if history_filter_skipped:
-            reason += " 历史日线不可用，已跳过250日趋势过滤。"
+        reason = f"首板评分 {round(score, 1)} 分，{board_name} 板块涨停 {board_count} 家，板块排名第 {board_rank}。"
 
         return (
             ScreeningItem(
                 stockName=name,
                 symbol=symbol,
                 floatMarketCap=f"{float_market_cap_yi:.2f}亿",
+                boardName=board_name,
+                boardRank=board_rank,
+                boardLimitUpCount=board_count,
                 turnoverRate=f"{turnover:.2f}%",
                 sealTime=seal_time,
-                sealAmountOrLots=f"{seal_amount_yi:.2f}亿封单资金",
-                limitUpDriver=limit_up_driver,
-                boardName=board_name,
-                boardLimitUpCount=board_count,
+                sealOrderLots=seal_order_lots,
+                openBoardCount=open_board_count,
                 totalScore=round(score, 2),
+                isLimitUp=True,
                 strategyTag="first_board_to_second",
                 recommendReason=reason,
             ),
@@ -259,6 +340,7 @@ class ScreenerService:
             return None
         board_name = self._board_name(row)
         board_count = context.board_counts.get(board_name, 0)
+        board_rank = context.board_ranks.get(board_name, 0)
         if board_count < 2:
             return None
         float_market_cap_yi = self._to_yi(row.get("流通市值"))
@@ -274,29 +356,26 @@ class ScreenerService:
         is_weak_pattern = board_break_count >= 1 or self._is_late_board(last_time) or self._is_late_board(first_time)
         if not is_weak_pattern:
             return None
-        seal_amount_yi = self._to_yi(row.get("封板资金"))
+        seal_funds = self._to_float(row.get("封板资金"))
         board_strength = context.board_strength.get(board_name, 0.0)
-        limit_up_driver = self._limit_up_driver(row, context)
-        score = 0.0
-        score += 8.0 if board_break_count >= 1 else 4.0
-        score += 7.0 if board_count >= 5 else 5.0 if board_count >= 3 else 2.0
-        score += 6.0 if 5 <= turnover <= 12 else 4.0
-        score += 5.0 if self._is_late_board(last_time) else 2.0
-        score += 3.0 if board_strength > 0 else 1.0
+        latest_price = self._to_float(row.get("最新价"))
+        is_limit_up = self._to_float(row.get("涨跌幅")) >= 9.5
 
         return ScreeningItem(
             stockName=name,
             symbol=symbol,
             floatMarketCap=f"{float_market_cap_yi:.2f}亿",
+            boardName=board_name,
+            boardRank=board_rank,
+            boardLimitUpCount=board_count,
             turnoverRate=f"{turnover:.2f}%",
             sealTime=last_time,
-            sealAmountOrLots=f"{seal_amount_yi:.2f}亿封单资金",
-            limitUpDriver=limit_up_driver,
-            boardName=board_name,
-            boardLimitUpCount=board_count,
-            totalScore=round(score + board_count_value, 2),
+            sealOrderLots=self._format_seal_order_lots(seal_funds, latest_price),
+            openBoardCount=board_break_count,
+            totalScore=None,
+            isLimitUp=is_limit_up,
             strategyTag="weak_to_strong_2nd",
-            recommendReason=f"{board_count_value} 板弱转强候选，驱动 {limit_up_driver}，板块强度 {board_strength:.2f}，炸板次数 {board_break_count}。",
+            recommendReason=f"{board_count_value} 板弱转强候选，板块强度 {board_strength:.2f}，炸板次数 {board_break_count}。",
         )
 
     def _build_candidate_context(self, dataset: MarketDataset) -> CandidateContext:
@@ -309,6 +388,12 @@ class ScreenerService:
                 .value_counts()
                 .to_dict()
             )
+        board_ranks: dict[str, int] = {}
+        for index, (board_name, _) in enumerate(
+            sorted(board_counts.items(), key=lambda item: (-item[1], item[0])),
+            start=1,
+        ):
+            board_ranks[board_name] = index
         board_strength: dict[str, float] = {}
         if not dataset.board_snapshot.empty and "板块名称" in dataset.board_snapshot.columns:
             for _, row in dataset.board_snapshot.iterrows():
@@ -321,6 +406,7 @@ class ScreenerService:
                 board_drivers[board_name] = driver_name
         return CandidateContext(
             board_counts=board_counts,
+            board_ranks=board_ranks,
             board_strength=board_strength,
             board_drivers=board_drivers,
         )
@@ -350,17 +436,24 @@ class ScreenerService:
 
     @staticmethod
     def _passes_history_filters(history: pd.DataFrame) -> bool:
-        if history.empty or "收盘" not in history.columns:
-            return False
-        closes = pd.to_numeric(history["收盘"], errors="coerce").dropna()
-        if len(closes) < 250:
-            return False
-        ma250 = closes.tail(250).mean()
-        current_close = closes.iloc[-1]
-        if current_close <= ma250:
+        if history.empty:
             return False
         pct_change = pd.to_numeric(history.get("涨跌幅"), errors="coerce").fillna(0)
-        return bool((pct_change.tail(60) >= 9.5).any())
+        if pct_change.empty:
+            return False
+        recent_limit_up = bool((pct_change.tail(60) >= 9.5).any())
+        if not recent_limit_up:
+            return False
+        recent_streak = (pct_change.tail(120) >= 9.5).astype(int)
+        max_streak = 0
+        current_streak = 0
+        for value in recent_streak:
+            if value == 1:
+                current_streak += 1
+                max_streak = max(max_streak, current_streak)
+            else:
+                current_streak = 0
+        return max_streak < 4
 
     @staticmethod
     def _to_float(value: object) -> float:
@@ -460,7 +553,8 @@ class ScreenerService:
     def _with_recommendation_score(item: ScreeningItem) -> ScreeningItem:
         board_bonus = min(item.boardLimitUpCount * 0.8, 6.0)
         strategy_bonus = 1.5 if item.strategyTag == "first_board_to_second" else 2.5
-        score = round(item.totalScore + board_bonus + strategy_bonus, 2)
+        base_score = item.totalScore or 0.0
+        score = round(base_score + board_bonus + strategy_bonus, 2)
         return item.model_copy(
             update={
                 "totalScore": score,
@@ -480,3 +574,108 @@ class ScreenerService:
                 return value
         board_name = ScreenerService._board_name(row)
         return context.board_drivers.get(board_name, board_name)
+
+    @staticmethod
+    def _format_seal_order_lots(seal_funds: float, latest_price: float) -> str:
+        if seal_funds <= 0 or latest_price <= 0:
+            return "--"
+        lots = seal_funds / latest_price / 100
+        if lots >= 10000:
+            return f"{lots / 10000:.2f}万手"
+        return f"{lots:.0f}手"
+
+    @staticmethod
+    def _highest_board_row(limit_up_pool: pd.DataFrame) -> pd.Series:
+        if limit_up_pool.empty or "连板数" not in limit_up_pool.columns:
+            return pd.Series(dtype=object)
+        frame = limit_up_pool.copy()
+        frame["连板数"] = pd.to_numeric(frame["连板数"], errors="coerce").fillna(0)
+        frame = frame.sort_values(["连板数", "封板资金"], ascending=[False, False])
+        return frame.iloc[0] if not frame.empty else pd.Series(dtype=object)
+
+    @staticmethod
+    def _promotion_rate(dataset: MarketDataset) -> tuple[float, str]:
+        previous = dataset.previous_limit_up_pool.copy()
+        if previous.empty:
+            return 0.0, "暂无昨日连板样本"
+        if "昨日连板数" not in previous.columns:
+            return 0.0, "昨日连板数据缺失"
+        previous["昨日连板数"] = pd.to_numeric(previous["昨日连板数"], errors="coerce").fillna(0)
+        previous_multiboard = previous[previous["昨日连板数"] >= 2]
+        previous_count = int(len(previous_multiboard.index))
+        if previous_count == 0:
+            return 0.0, "昨日无连板股"
+        today = dataset.limit_up_pool.copy()
+        if today.empty or "连板数" not in today.columns:
+            return 0.0, f"0%（昨日{previous_count}只连板，今日0只晋级）"
+        today["连板数"] = pd.to_numeric(today["连板数"], errors="coerce").fillna(0)
+        merged = today.merge(
+            previous_multiboard[["代码", "昨日连板数"]],
+            on="代码",
+            how="inner",
+        )
+        promoted = merged[merged["连板数"] >= merged["昨日连板数"] + 1]
+        promoted_count = int(len(promoted.index))
+        rate = promoted_count / previous_count if previous_count else 0.0
+        return rate, f"{rate:.0%}（昨日{previous_count}只连板，今日{promoted_count}只晋级）"
+
+    @staticmethod
+    def _market_regime(
+        limit_up_count: int,
+        highest_board: int,
+        promotion_rate: float,
+        has_limit_down_wave: bool,
+    ) -> str:
+        if (
+            limit_up_count > 60
+            and highest_board >= 5
+            and promotion_rate > 0.25
+        ):
+            return "GREEN"
+        if 40 <= limit_up_count <= 60 and highest_board >= 4 and promotion_rate <= 0.25 and not has_limit_down_wave:
+            return "YELLOW"
+        return "RED"
+
+    @staticmethod
+    def _regime_label(regime: str) -> str:
+        return {"GREEN": "绿灯", "YELLOW": "黄灯", "RED": "红灯"}.get(regime, regime)
+
+    def _position_advice(self, regime: str) -> str:
+        if regime == "GREEN":
+            return "绿灯 + 一进二：仓位上限 100%，可满仓总龙头或分仓两只。"
+        if regime == "YELLOW":
+            return "黄灯 + 一进二：仓位上限 40%，强制分仓两只各 20%。"
+        return "红灯：不开新仓，仅允许 0-10% 观察仓。"
+
+    @staticmethod
+    def _limit_up_status(limit_up_count: int) -> str:
+        if limit_up_count > 60:
+            return "绿灯"
+        if 40 <= limit_up_count <= 60:
+            return "黄灯"
+        return "红灯"
+
+    @staticmethod
+    def _highest_board_status(highest_board: int) -> str:
+        if highest_board >= 5:
+            return "绿灯"
+        if highest_board >= 4:
+            return "黄灯"
+        return "红灯"
+
+    @staticmethod
+    def _promotion_status(promotion_rate: float) -> str:
+        return "绿灯" if promotion_rate > 0.25 else "黄灯"
+
+    @staticmethod
+    def _weekday_label(trade_date: str) -> str:
+        weekday_map = {
+            0: "星期一",
+            1: "星期二",
+            2: "星期三",
+            3: "星期四",
+            4: "星期五",
+            5: "星期六",
+            6: "星期日",
+        }
+        return weekday_map[datetime.strptime(trade_date, "%Y-%m-%d").weekday()]

@@ -39,6 +39,15 @@ def test_top5_demo_response() -> None:
     assert len(body["items"]) <= 5
 
 
+def test_market_signal_response() -> None:
+    response = client.post("/screen/market-signal", json={"use_demo_on_failure": True})
+    body = response.json()
+    assert response.status_code == 200
+    assert "trade_date" in body
+    assert "regime" in body
+    assert "indicators" in body
+
+
 class EmptyDataService:
     def get_market_dataset(self, trade_date: str | None = None) -> MarketDataset:
         return MarketDataset(
@@ -91,5 +100,5 @@ def test_first_board_skips_history_filter_when_history_unavailable() -> None:
     response = service.screen_first_board("20260415", use_demo_on_failure=True)
     assert response.market_summary.source == "live"
     assert len(response.items) == 1
-    assert any("250-day trend filter was skipped" in note for note in response.market_summary.notes)
-    assert "历史日线不可用" in response.items[0].recommendReason
+    assert response.market_summary.notes == []
+    assert "历史日线不可用" not in response.items[0].recommendReason

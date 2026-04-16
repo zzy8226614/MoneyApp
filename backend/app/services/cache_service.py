@@ -23,6 +23,6 @@ class JsonCacheService:
     def save(self, key: str, payload: Any) -> None:
         path = self._path(key)
         path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
+            json.dumps(payload, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
         )

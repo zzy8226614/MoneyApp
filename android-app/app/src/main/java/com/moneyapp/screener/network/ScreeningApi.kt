@@ -1,6 +1,7 @@
 package com.moneyapp.screener.network
 
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
+import com.moneyapp.screener.model.MarketSignalResponse
 import com.moneyapp.screener.model.ScreeningRequest
 import com.moneyapp.screener.model.ScreeningResponse
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -14,6 +15,9 @@ import retrofit2.http.POST
 import java.util.concurrent.TimeUnit
 
 interface ScreeningApi {
+    @POST("screen/market-signal")
+    suspend fun marketSignal(@Body request: ScreeningRequest): MarketSignalResponse
+
     @POST("screen/first-board")
     suspend fun screenFirstBoard(@Body request: ScreeningRequest): ScreeningResponse
 

@@ -3,8 +3,6 @@ package com.moneyapp.screener.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -12,7 +10,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -28,9 +25,13 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.moneyapp.screener.model.MarketSignalIndicator
+import com.moneyapp.screener.model.MarketSignalResponse
 import com.moneyapp.screener.model.ScreenDestination
 import com.moneyapp.screener.model.ScreeningItem
 import com.moneyapp.screener.model.ScreeningResponse
@@ -44,36 +45,48 @@ fun MoneyAppRoot(viewModel: ScreeningViewModel = viewModel()) {
             state = state,
             onBaseUrlChanged = viewModel::updateBaseUrl,
             onTradeDateChanged = viewModel::updateTradeDate,
+            onMarketSignalClick = viewModel::loadMarketSignal,
             onFirstBoardClick = viewModel::loadFirstBoard,
             onWeakToStrongClick = viewModel::loadWeakToStrong,
             onTop5Click = viewModel::loadTop5,
         )
 
-        ScreenDestination.FIRST_BOARD -> ResultPage(
+        ScreenDestination.MARKET_SIGNAL -> MarketSignalPage(
+            response = state.marketSignalResponse,
+            isLoading = state.isLoading,
+            errorMessage = state.errorMessage,
+            onBack = viewModel::backToHome,
+            onRefresh = viewModel::refreshMarketSignal,
+        )
+
+        ScreenDestination.FIRST_BOARD -> ScreeningResultPage(
             title = "一进二结果",
             response = state.firstBoardResponse,
             isLoading = state.isLoading,
             errorMessage = state.errorMessage,
             onBack = viewModel::backToHome,
-            onRefresh = viewModel::loadFirstBoard,
+            onRefresh = viewModel::refreshFirstBoard,
+            cardContent = { FirstBoardItemCard(it) },
         )
 
-        ScreenDestination.WEAK_TO_STRONG -> ResultPage(
+        ScreenDestination.WEAK_TO_STRONG -> ScreeningResultPage(
             title = "弱转强结果",
             response = state.weakToStrongResponse,
             isLoading = state.isLoading,
             errorMessage = state.errorMessage,
             onBack = viewModel::backToHome,
-            onRefresh = viewModel::loadWeakToStrong,
+            onRefresh = viewModel::refreshWeakToStrong,
+            cardContent = { WeakToStrongItemCard(it) },
         )
 
-        ScreenDestination.TOP5 -> ResultPage(
+        ScreenDestination.TOP5 -> ScreeningResultPage(
             title = "Top5 推荐",
             response = state.top5Response,
             isLoading = state.isLoading,
             errorMessage = state.errorMessage,
             onBack = viewModel::backToHome,
-            onRefresh = viewModel::loadTop5,
+            onRefresh = viewModel::refreshTop5,
+            cardContent = { Top5ItemCard(it) },
         )
     }
 }
@@ -84,13 +97,14 @@ private fun HomePage(
     state: UiState,
     onBaseUrlChanged: (String) -> Unit,
     onTradeDateChanged: (String) -> Unit,
+    onMarketSignalClick: () -> Unit,
     onFirstBoardClick: () -> Unit,
     onWeakToStrongClick: () -> Unit,
     onTop5Click: () -> Unit,
 ) {
     Scaffold(
         topBar = {
-            CenterAlignedTopAppBar(title = { Text("MoneyAPP 选股器") })
+            CenterAlignedTopAppBar(title = { Text("超短线选股神器") })
         },
     ) { padding ->
         Column(
@@ -121,6 +135,13 @@ private fun HomePage(
                 supportingText = { Text("支持 YYYY-MM-DD 或 YYYYMMDD，为空则默认今天。") },
                 singleLine = true,
             )
+            Button(
+                onClick = onMarketSignalClick,
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !state.isLoading,
+            ) {
+                Text("情绪信号")
+            }
             Button(
                 onClick = onFirstBoardClick,
                 modifier = Modifier.fillMaxWidth(),
@@ -165,13 +186,14 @@ private fun HomePage(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ResultPage(
+private fun ScreeningResultPage(
     title: String,
     response: ScreeningResponse?,
     isLoading: Boolean,
     errorMessage: String?,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
+    cardContent: @Composable (ScreeningItem) -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -192,46 +214,300 @@ private fun ResultPage(
                 .padding(padding),
         ) {
             when {
-                isLoading -> {
-                    CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+                isLoading -> CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+                errorMessage != null -> ErrorState(errorMessage)
+                response == null -> CenterText("暂无结果")
+                response.items.isEmpty() -> EmptyState(response)
+                else -> LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(12.dp),
+                ) {
+                    item { MarketSummaryCard(response) }
+                    items(response.items) { item -> cardContent(item) }
                 }
+            }
+        }
+    }
+}
 
-                errorMessage != null -> {
-                    Text(
-                        text = errorMessage,
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .padding(24.dp),
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-
-                response == null -> {
-                    Text(
-                        text = "暂无结果",
-                        modifier = Modifier.align(Alignment.Center),
-                    )
-                }
-
-                response.items.isEmpty() -> {
-                    EmptyState(response = response)
-                }
-
-                else -> {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                        contentPadding = PaddingValues(16.dp),
-                    ) {
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MarketSignalPage(
+    response: MarketSignalResponse?,
+    isLoading: Boolean,
+    errorMessage: String?,
+    onBack: () -> Unit,
+    onRefresh: () -> Unit,
+) {
+    Scaffold(
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = { Text("情绪信号") },
+                navigationIcon = {
+                    TextButton(onClick = onBack) { Text("返回") }
+                },
+                actions = {
+                    TextButton(onClick = onRefresh, enabled = !isLoading) { Text("刷新") }
+                },
+            )
+        },
+    ) { padding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+        ) {
+            when {
+                isLoading -> CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+                errorMessage != null -> ErrorState(errorMessage)
+                response == null -> CenterText("暂无结果")
+                else -> LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(12.dp),
+                ) {
+                    item { MarketSignalSummaryCard(response) }
+                    item { MarketSignalIndicatorTable(response.indicators) }
+                    if (response.notes.isNotEmpty()) {
                         item {
-                            MarketSummaryCard(response = response)
-                        }
-                        items(response.items) { item ->
-                            ScreeningItemCard(item = item)
+                            NotesCard(response.notes)
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun MarketSummaryCard(response: ScreeningResponse) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = "交易日：${response.marketSummary.tradeDate}",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            CompactInfoLine("涨停总数", response.marketSummary.limitUpCount.toString())
+            CompactInfoLine("一进二候选", response.marketSummary.firstBoardCount.toString())
+            CompactInfoLine("弱转强候选", response.marketSummary.weakToStrongCount.toString())
+            CompactInfoLine("数据来源", response.marketSummary.source)
+            response.marketSummary.notes.forEach { note ->
+                Text(note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarketSignalSummaryCard(response: MarketSignalResponse) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = "${response.tradeDate} ${response.weekday}",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            CompactInfoLine("大盘表现", response.marketOverview)
+            CompactInfoLine("成交额", response.turnoverOverview)
+            CompactInfoLine("情绪判定", response.regimeLabel)
+            CompactInfoLine("仓位建议", response.positionAdvice)
+        }
+    }
+}
+
+@Composable
+private fun MarketSignalIndicatorTable(indicators: List<MarketSignalIndicator>) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text("指标概览", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+            CompactIndicatorRow("指标", "今日数值", "系统标准", "是否达标", isHeader = true)
+            indicators.forEach { indicator ->
+                CompactIndicatorRow(
+                    indicator.name,
+                    indicator.todayValue,
+                    indicator.standard,
+                    indicator.status,
+                    isHeader = false,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun FirstBoardItemCard(item: ScreeningItem) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = item.stockName,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            CompactMetricRow(
+                listOf(
+                    "流通市值" to item.floatMarketCap,
+                    "所属板块" to item.boardName,
+                    "板块排名" to formatBoardRank(item.boardRank),
+                    "总分" to (item.totalScore?.let { "%.1f".format(it) } ?: "--"),
+                ),
+            )
+            CompactMetricRow(
+                listOf(
+                    "封单时间" to item.sealTime,
+                    "封单手数" to item.sealOrderLots,
+                    "开板次数" to item.openBoardCount.toString(),
+                    "换手率" to item.turnoverRate,
+                    "板块涨停数" to item.boardLimitUpCount.toString(),
+                ),
+            )
+            Text(item.recommendReason, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun WeakToStrongItemCard(item: ScreeningItem) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = item.stockName,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            CompactMetricRow(
+                listOf(
+                    "流通市值" to item.floatMarketCap,
+                    "所属板块" to item.boardName,
+                    "板块排名" to formatBoardRank(item.boardRank),
+                    "是否涨停" to if (item.isLimitUp) "是" else "否",
+                ),
+            )
+            CompactMetricRow(
+                listOf(
+                    "开板次数" to item.openBoardCount.toString(),
+                    "换手率" to item.turnoverRate,
+                    "板块涨停数" to item.boardLimitUpCount.toString(),
+                ),
+            )
+            Text(item.recommendReason, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun Top5ItemCard(item: ScreeningItem) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = item.stockName,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            CompactMetricRow(
+                listOf(
+                    "流通市值" to item.floatMarketCap,
+                    "所属板块" to item.boardName,
+                    "板块排名" to formatBoardRank(item.boardRank),
+                    "策略" to strategyLabel(item.strategyTag),
+                ),
+            )
+            CompactInfoLine("入选理由", item.recommendReason)
+        }
+    }
+}
+
+@Composable
+private fun CompactMetricRow(metrics: List<Pair<String, String>>) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        metrics.forEach { (label, value) ->
+            CompactMetricCell(label, value, Modifier.weight(1f))
+        }
+    }
+}
+
+@Composable
+private fun CompactMetricCell(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(modifier = modifier) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun CompactInfoLine(label: String, value: String) {
+    Text(text = "$label：$value", style = MaterialTheme.typography.bodySmall, fontSize = 12.sp)
+}
+
+@Composable
+private fun CompactIndicatorRow(
+    title: String,
+    todayValue: String,
+    standard: String,
+    status: String,
+    isHeader: Boolean,
+) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        CompactIndicatorCell(title, Modifier.weight(1.0f), isHeader)
+        CompactIndicatorCell(todayValue, Modifier.weight(1.4f), isHeader)
+        CompactIndicatorCell(standard, Modifier.weight(1.5f), isHeader)
+        CompactIndicatorCell(status, Modifier.weight(0.9f), isHeader)
+    }
+}
+
+@Composable
+private fun CompactIndicatorCell(text: String, modifier: Modifier, isHeader: Boolean) {
+    Text(
+        text = text,
+        modifier = modifier,
+        style = if (isHeader) MaterialTheme.typography.labelSmall else MaterialTheme.typography.bodySmall,
+        fontWeight = if (isHeader) FontWeight.Bold else FontWeight.Normal,
+        fontSize = if (isHeader) 11.sp else 12.sp,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+    )
+}
+
+@Composable
+private fun NotesCard(notes: List<String>) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text("备注", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+            notes.forEach { note -> Text(note, style = MaterialTheme.typography.bodySmall) }
         }
     }
 }
@@ -246,92 +522,32 @@ private fun EmptyState(response: ScreeningResponse) {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text("当日无符合条件标的")
-        Text(
-            text = "交易日：${response.tradeDate}",
-            style = MaterialTheme.typography.bodyMedium,
-        )
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun MarketSummaryCard(response: ScreeningResponse) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(
-                text = "交易日：${response.marketSummary.tradeDate}",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-            )
-            Text("涨停总数：${response.marketSummary.limitUpCount}")
-            Text("一进二候选：${response.marketSummary.firstBoardCount}")
-            Text("弱转强候选：${response.marketSummary.weakToStrongCount}")
-            Text("数据来源：${response.marketSummary.source}")
-            if (response.marketSummary.notes.isNotEmpty()) {
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    response.marketSummary.notes.forEach { note ->
-                        AssistChip(
-                            onClick = {},
-                            label = { Text(note) },
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun ScreeningItemCard(item: ScreeningItem) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(
-                text = "${item.stockName} (${item.symbol})",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-            )
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                InfoChip("流通市值", item.floatMarketCap)
-                InfoChip("换手率", item.turnoverRate)
-                InfoChip("封单时间", item.sealTime)
-                InfoChip("收盘封单数", item.sealAmountOrLots)
-                InfoChip("涨停驱动", item.limitUpDriver)
-                InfoChip("所属板块", item.boardName)
-                InfoChip("板块涨停数", item.boardLimitUpCount.toString())
-                InfoChip("总分", item.totalScore.toString())
-            }
-            Text(
-                text = item.recommendReason,
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            TextButton(onClick = {}) {
-                Text(if (item.strategyTag == "first_board_to_second") "策略：一进二" else "策略：弱转强")
-            }
-        }
+        Text("交易日：${response.tradeDate}", style = MaterialTheme.typography.bodyMedium)
     }
 }
 
 @Composable
-private fun InfoChip(label: String, value: String) {
-    Card {
-        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            Text(
-                text = value,
-                style = MaterialTheme.typography.bodyMedium,
-            )
-        }
+private fun ErrorState(message: String) {
+    Text(
+        text = message,
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        color = MaterialTheme.colorScheme.error,
+    )
+}
+
+@Composable
+private fun CenterText(message: String) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Text(message)
     }
+}
+
+private fun strategyLabel(strategyTag: String): String {
+    return if (strategyTag == "first_board_to_second") "一进二" else "弱转强"
+}
+
+private fun formatBoardRank(rank: Int): String {
+    return if (rank > 0) "第${rank}名" else "--"
 }

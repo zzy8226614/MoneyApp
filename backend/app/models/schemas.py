@@ -14,19 +14,25 @@ class ScreeningRequest(BaseModel):
         default=True,
         description="Fallback to bundled demo data when Akshare is unavailable.",
     )
+    force_refresh: bool = Field(
+        default=False,
+        description="Force refresh from live source and bypass client-side cache when supported.",
+    )
 
 
 class ScreeningItem(BaseModel):
     stockName: str
     symbol: str
     floatMarketCap: str
+    boardName: str
+    boardRank: int = 0
+    boardLimitUpCount: int
     turnoverRate: str
     sealTime: str
-    sealAmountOrLots: str
-    limitUpDriver: str
-    boardName: str
-    boardLimitUpCount: int
-    totalScore: float
+    sealOrderLots: str = "--"
+    openBoardCount: int = 0
+    totalScore: float | None = None
+    isLimitUp: bool = True
     strategyTag: Literal["first_board_to_second", "weak_to_strong_2nd"]
     recommendReason: str
 
@@ -44,6 +50,26 @@ class ScreeningResponse(BaseModel):
     trade_date: str
     market_summary: MarketSummary
     items: list[ScreeningItem] = Field(default_factory=list)
+    error: str | None = None
+
+
+class MarketSignalIndicator(BaseModel):
+    name: str
+    todayValue: str
+    standard: str
+    status: str
+
+
+class MarketSignalResponse(BaseModel):
+    trade_date: str
+    weekday: str
+    marketOverview: str
+    turnoverOverview: str
+    regime: Literal["GREEN", "YELLOW", "RED"]
+    regimeLabel: str
+    positionAdvice: str
+    indicators: list[MarketSignalIndicator] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
     error: str | None = None
 
 
