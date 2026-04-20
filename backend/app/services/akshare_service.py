@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 import akshare as ak
 import pandas as pd
@@ -36,48 +37,91 @@ class MarketOverviewSnapshot:
 
 
 class AkshareDataService:
-    def __init__(self, cache_service: JsonCacheService | None = None, max_retries: int = 1) -> None:
+    def __init__(
+        self,
+        cache_service: JsonCacheService | None = None,
+        max_retries: int = 1,
+        fetch_timeout_seconds: float = 8.0,
+    ) -> None:
         self.cache_service = cache_service or JsonCacheService()
         self.max_retries = max_retries
+        self._memory_cache: dict[str, pd.DataFrame] = {}
+        self.fetch_timeout_seconds = fetch_timeout_seconds
+        self._fetch_executor = ThreadPoolExecutor(max_workers=8)
+
+    def _fetch_with_timeout(self, fetcher: Callable[[], pd.DataFrame]) -> pd.DataFrame:
+        future = self._fetch_executor.submit(fetcher)
+        try:
+            return future.result(timeout=self.fetch_timeout_seconds)
+        except FutureTimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(
+                f"Akshare fetch timeout after {self.fetch_timeout_seconds:.1f}s"
+            ) from exc
 
     def _run_with_cache(
         self,
         cache_key: str,
         fetcher: Callable[[], pd.DataFrame],
+        force_refresh: bool = False,
+        allow_live_fetch: bool = True,
     ) -> tuple[pd.DataFrame, str]:
+        if not force_refresh:
+            in_memory = self._memory_cache.get(cache_key)
+            if in_memory is not None:
+                return in_memory.copy(deep=False), "cache"
+            cached = self.cache_service.load(cache_key)
+            if cached is not None:
+                frame = pd.DataFrame(cached)
+                self._memory_cache[cache_key] = frame
+                return frame.copy(deep=False), "cache"
+
+        if not allow_live_fetch:
+            return pd.DataFrame(), "empty"
+
         last_error: Exception | None = None
         for _ in range(self.max_retries):
             try:
-                frame = fetcher()
+                frame = self._fetch_with_timeout(fetcher)
                 if frame is not None and not frame.empty:
                     records = frame.to_dict(orient="records")
                     self.cache_service.save(cache_key, records)
-                    return frame, "live"
+                    self._memory_cache[cache_key] = frame
+                    return frame.copy(deep=False), "live"
             except Exception as exc:  # pragma: no cover - network dependent
                 last_error = exc
 
         cached = self.cache_service.load(cache_key)
-        if cached:
-            return pd.DataFrame(cached), "cache"
+        if cached is not None:
+            frame = pd.DataFrame(cached)
+            self._memory_cache[cache_key] = frame
+            return frame.copy(deep=False), "cache"
 
         if last_error is not None:
             raise last_error
         return pd.DataFrame(), "empty"
 
-    def get_market_dataset(self, trade_date: str | None = None) -> MarketDataset:
+    def get_market_dataset(
+        self,
+        trade_date: str | None = None,
+        force_refresh: bool = False,
+    ) -> MarketDataset:
         compact_date, pretty_date = _normalize_trade_date(trade_date)
         limit_up_pool, limit_up_source = self._run_with_cache(
             f"limit_up_pool_{compact_date}",
             lambda: ak.stock_zt_pool_em(date=compact_date),
+            force_refresh=force_refresh,
         )
         previous_limit_up_pool, previous_source = self._run_with_cache(
             f"previous_limit_up_pool_{compact_date}",
             lambda: ak.stock_zt_pool_previous_em(date=compact_date),
+            force_refresh=force_refresh,
         )
         try:
             board_snapshot, board_source = self._run_with_cache(
                 f"industry_board_snapshot_{compact_date}",
                 lambda: ak.stock_board_industry_name_em(),
+                force_refresh=force_refresh,
             )
         except Exception:  # pragma: no cover - network dependent
             board_snapshot, board_source = pd.DataFrame(), "empty"
@@ -93,7 +137,13 @@ class AkshareDataService:
             board_snapshot=board_snapshot,
         )
 
-    def get_stock_history(self, symbol: str, trade_date: str | None = None) -> pd.DataFrame:
+    def get_stock_history(
+        self,
+        symbol: str,
+        trade_date: str | None = None,
+        force_refresh: bool = False,
+        allow_live_fetch: bool = True,
+    ) -> pd.DataFrame:
         compact_date, _ = _normalize_trade_date(trade_date)
         cache_key = f"hist_{symbol}_{compact_date}"
 
@@ -106,18 +156,28 @@ class AkshareDataService:
                 adjust="qfq",
             )
 
-        frame, _ = self._run_with_cache(cache_key, fetcher)
+        frame, _ = self._run_with_cache(
+            cache_key,
+            fetcher,
+            force_refresh=force_refresh,
+            allow_live_fetch=allow_live_fetch,
+        )
         return frame
 
-    def get_limit_down_pool(self, trade_date: str | None = None) -> pd.DataFrame:
+    def get_limit_down_pool(self, trade_date: str | None = None, force_refresh: bool = False) -> pd.DataFrame:
         compact_date, _ = _normalize_trade_date(trade_date)
         frame, _ = self._run_with_cache(
             f"limit_down_pool_{compact_date}",
             lambda: ak.stock_zt_pool_dtgc_em(date=compact_date),
+            force_refresh=force_refresh,
         )
         return frame
 
-    def get_market_overview(self, trade_date: str | None = None) -> MarketOverviewSnapshot:
+    def get_market_overview(
+        self,
+        trade_date: str | None = None,
+        force_refresh: bool = False,
+    ) -> MarketOverviewSnapshot:
         compact_date, pretty_date = _normalize_trade_date(trade_date)
         notes: list[str] = []
         snapshots: list[dict[str, float | str]] = []
@@ -131,6 +191,7 @@ class AkshareDataService:
                 index_frame, source = self._run_with_cache(
                     f"index_daily_tx_{symbol}_{compact_date}",
                     lambda symbol=symbol: ak.stock_zh_index_daily_tx(symbol=symbol),
+                    force_refresh=force_refresh,
                 )
                 if source == "cache":
                     cached_indexes.append(display_name)

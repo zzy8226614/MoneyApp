@@ -16,6 +16,16 @@ def test_health() -> None:
     assert response.json()["status"] == "ok"
 
 
+def test_v1_health() -> None:
+    response = client.get("/api/v1/health", headers={"X-Client-Type": "windows-mfc"})
+    body = response.json()
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert body["data"]["status"] == "ok"
+    assert body["meta"]["clientType"] == "windows-mfc"
+    assert response.headers["X-Request-Id"]
+
+
 def test_first_board_demo_response() -> None:
     response = client.post("/screen/first-board", json={"use_demo_on_failure": True})
     body = response.json()
@@ -48,8 +58,36 @@ def test_market_signal_response() -> None:
     assert "indicators" in body
 
 
+def test_v1_first_board_response() -> None:
+    response = client.post(
+        "/api/v1/screen/first-board",
+        json={"use_demo_on_failure": True},
+        headers={"X-Client-Type": "windows-mfc"},
+    )
+    body = response.json()
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert "data" in body
+    assert "meta" in body
+    assert body["meta"]["clientType"] == "windows-mfc"
+    assert "trade_date" in body["data"]
+
+
+def test_v1_market_signal_response() -> None:
+    response = client.post(
+        "/api/v1/screen/market-signal",
+        json={"use_demo_on_failure": True},
+        headers={"X-Client-Type": "android"},
+    )
+    body = response.json()
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert body["meta"]["clientType"] == "android"
+    assert "regime" in body["data"]
+
+
 class EmptyDataService:
-    def get_market_dataset(self, trade_date: str | None = None) -> MarketDataset:
+    def get_market_dataset(self, trade_date: str | None = None, force_refresh: bool = False) -> MarketDataset:
         return MarketDataset(
             trade_date="2026-04-15",
             source="empty",
@@ -67,7 +105,7 @@ def test_empty_dataset_uses_demo_when_enabled() -> None:
 
 
 class HistoryUnavailableDataService:
-    def get_market_dataset(self, trade_date: str | None = None) -> MarketDataset:
+    def get_market_dataset(self, trade_date: str | None = None, force_refresh: bool = False) -> MarketDataset:
         limit_up_pool = pd.DataFrame(
             [
                 {
@@ -91,7 +129,12 @@ class HistoryUnavailableDataService:
             board_snapshot=pd.DataFrame(),
         )
 
-    def get_stock_history(self, symbol: str, trade_date: str | None = None) -> pd.DataFrame:
+    def get_stock_history(
+        self,
+        symbol: str,
+        trade_date: str | None = None,
+        force_refresh: bool = False,
+    ) -> pd.DataFrame:
         raise ConnectionError("historical data unavailable")
 
 
@@ -100,5 +143,5 @@ def test_first_board_skips_history_filter_when_history_unavailable() -> None:
     response = service.screen_first_board("20260415", use_demo_on_failure=True)
     assert response.market_summary.source == "live"
     assert len(response.items) == 1
-    assert response.market_summary.notes == []
+    assert any("历史行情不可用" in note for note in response.market_summary.notes)
     assert "历史日线不可用" not in response.items[0].recommendReason

@@ -7,6 +7,9 @@ import com.moneyapp.screener.model.MarketSignalResponse
 import com.moneyapp.screener.model.ScreenDestination
 import com.moneyapp.screener.model.ScreeningResponse
 import com.moneyapp.screener.repository.ScreeningRepository
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -14,8 +17,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class UiState(
-    val baseUrl: String = "http://124.222.30.192:8000/",
-    val tradeDate: String = "",
+    val baseUrl: String = "http://183.62.173.178:8000/",
+    val tradeDate: String = defaultTradeDate(),
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
     val currentScreen: ScreenDestination = ScreenDestination.HOME,
@@ -24,6 +27,9 @@ data class UiState(
     val weakToStrongResponse: ScreeningResponse? = null,
     val top5Response: ScreeningResponse? = null,
 )
+
+private fun defaultTradeDate(): String =
+    SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
 
 class ScreeningViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = ScreeningRepository.create(application)
@@ -139,6 +145,7 @@ class ScreeningViewModel(application: Application) : AndroidViewModel(applicatio
             val current = _uiState.value
             _uiState.update {
                 it.copy(
+                    currentScreen = ScreenDestination.MARKET_SIGNAL,
                     isLoading = true,
                     errorMessage = null,
                 )
@@ -153,7 +160,6 @@ class ScreeningViewModel(application: Application) : AndroidViewModel(applicatio
                     _uiState.update {
                         it.copy(
                             marketSignalResponse = result.response.withCacheNote(result.fromCache),
-                            currentScreen = ScreenDestination.MARKET_SIGNAL,
                             isLoading = false,
                             errorMessage = result.response.error,
                         )
@@ -179,6 +185,7 @@ class ScreeningViewModel(application: Application) : AndroidViewModel(applicatio
             val current = _uiState.value
             _uiState.update {
                 it.copy(
+                    currentScreen = destination,
                     isLoading = true,
                     errorMessage = null,
                 )
@@ -187,7 +194,6 @@ class ScreeningViewModel(application: Application) : AndroidViewModel(applicatio
                 .onSuccess { result ->
                     _uiState.update {
                         onSuccess(it, result.response.withCacheNote(result.fromCache)).copy(
-                            currentScreen = destination,
                             isLoading = false,
                             errorMessage = result.response.error,
                         )

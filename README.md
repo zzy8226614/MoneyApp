@@ -5,6 +5,12 @@
 1. `backend/`：基于 `FastAPI + Akshare` 的选股后端。
 2. `android-app/`：基于 `Kotlin + Jetpack Compose` 的 Android APK 前端。
 
+当前仓库还新增了双端演进的基础骨架：
+
+3. `windows-mfc/`：Windows 10 原生宿主骨架。
+4. `web/desktop-shell/`：供 WebView2 承载的桌面前端壳层。
+5. `docs/`：接口契约、版本治理、兼容性与回归清单。
+
 ## 已实现功能
 
 ### 1. 一进二选股
@@ -64,6 +70,9 @@
 - 后端优先尝试实时调用 `Akshare`
 - 若本地网络或上游接口异常，则会优先使用本地缓存
 - 若缓存也不存在，则会回退到内置 demo 数据，保证 APK 可以完整走通交互链路
+- `api/v1` 路由新增服务端响应缓存（按交易日缓存 market-signal / first-board / weak-to-strong / top5）
+- 同一交易日非强刷请求可直接命中服务端缓存，进入“极速模式”（毫秒到秒级返回）
+- `force_refresh=true` 时会绕过服务端响应缓存，优先拉取实时数据
 
 这意味着：
 
@@ -90,6 +99,23 @@
 
 - `http://127.0.0.1:8000/health`
 - `http://127.0.0.1:8000/docs`
+- `http://127.0.0.1:8000/api/v1/health`
+
+## API Versioning
+
+- 旧版 Android 兼容路径继续保留：`/health`、`/screen/*`
+- 新版多客户端路径：`/api/v1/health`、`/api/v1/screen/*`
+- `/api/v1/*` 返回统一 envelope，便于 Windows/MFC 端做日志、诊断和错误处理
+
+相关文档：
+
+- `docs/api/legacy-contract.md`
+- `docs/api/versioning.md`
+- `docs/architecture/client-compatibility.md`
+- `docs/release/version-policy.md`
+- `docs/testing/android-regression-checklist.md`
+- `docs/windows/desktop-shell-architecture.md`
+- `docs/windows/run-host.md`
 
 ## 后端测试
 
@@ -100,6 +126,13 @@
 ## 腾讯云 CVM 部署
 
 当前后端已经按 `Ubuntu 22.04 + 公网 IP + HTTP` 方案验证通过，可直接部署到腾讯云 CVM。
+
+### 与旧部署文档相比的关键变更（请优先关注）
+
+- 旧版侧重“仅 Akshare 原始调用 + 本地数据缓存”；新版额外引入了 `api/v1` 层的**服务端响应缓存**，用于多端联调提速。
+- 旧版只要求服务可启动；新版建议首次部署后执行一次**接口预热**，把当日响应缓存准备好，避免首个用户请求等待较长时间。
+- 旧版桌面端依赖 `http://IP:8000/desktop-shell/` 页面；新版桌面壳默认由本地 `file://` 加载，服务器侧重点改为 `api/v1` 接口可用性。
+- 强制刷新（`force_refresh=true`）在新版会绕过服务端响应缓存；日常联调建议默认请求，只有需要拉最新实时数据时再点“刷新”。
 
 ### 服务器环境
 
@@ -152,6 +185,7 @@ python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
 
 ```bash
 curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/api/v1/health
 ```
 
 若正常，返回：
@@ -164,6 +198,18 @@ curl http://127.0.0.1:8000/health
 
 ```text
 http://公网IP:8000/health
+http://公网IP:8000/api/v1/health
+```
+
+### 首次部署后的接口预热（推荐）
+
+> 目的：提前生成当日服务端响应缓存，避免首个客户端请求等待较长时间。
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/screen/market-signal -H "Content-Type: application/json" -d '{"trade_date":null,"use_demo_on_failure":true,"force_refresh":false}'
+curl -X POST http://127.0.0.1:8000/api/v1/screen/first-board   -H "Content-Type: application/json" -d '{"trade_date":null,"use_demo_on_failure":true,"force_refresh":false}'
+curl -X POST http://127.0.0.1:8000/api/v1/screen/weak-to-strong -H "Content-Type: application/json" -d '{"trade_date":null,"use_demo_on_failure":true,"force_refresh":false}'
+curl -X POST http://127.0.0.1:8000/api/v1/screen/top5          -H "Content-Type: application/json" -d '{"trade_date":null,"use_demo_on_failure":true,"force_refresh":false}'
 ```
 
 ### 腾讯云安全组
@@ -224,9 +270,124 @@ pip install -r backend/requirements.txt
 sudo systemctl restart moneyapp
 ```
 
+如需在服务更新后立即恢复“极速模式”，可重复执行一次上面的“接口预热”步骤。
+
+### 生产部署建议（Nginx + HTTPS + systemd）
+
+> 目标：避免直接暴露 `8000` 端口，统一通过 `443` 提供服务，并具备可观测、可续签、可滚动升级能力。
+
+#### 推荐拓扑
+
+- `uvicorn` 仅监听本机：`127.0.0.1:8000`
+- `Nginx` 对外监听：`80/443`
+- `Nginx` 反向代理到 `127.0.0.1:8000`
+- TLS 证书：`Let's Encrypt (certbot)`
+
+#### 1) 调整 systemd（仅本机监听）
+
+将 `moneyapp.service` 的启动参数改为：
+
+```ini
+ExecStart=/home/ubuntu/moneyapp-venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+```
+
+重载并重启：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart moneyapp
+sudo systemctl status moneyapp
+```
+
+#### 2) 安装 Nginx 与证书工具
+
+```bash
+sudo apt update
+sudo apt install -y nginx certbot python3-certbot-nginx
+```
+
+#### 3) 配置 Nginx 反向代理
+
+创建站点配置（示例域名：`api.example.com`）：
+
+```nginx
+server {
+    listen 80;
+    server_name api.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+    }
+}
+```
+
+启用配置并检查：
+
+```bash
+sudo nano /etc/nginx/sites-available/moneyapp
+sudo ln -s /etc/nginx/sites-available/moneyapp /etc/nginx/sites-enabled/moneyapp
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+#### 4) 签发 HTTPS 证书
+
+```bash
+sudo certbot --nginx -d api.example.com
+```
+
+签发完成后会自动写入 `443` 配置。验证：
+
+```bash
+curl https://api.example.com/api/v1/health
+```
+
+#### 5) 安全组与防火墙建议
+
+- 放通：`TCP 22`、`TCP 80`、`TCP 443`
+- 关闭公网 `8000` 入站（仅本机回环访问）
+- 若启用 `ufw`：
+
+```bash
+sudo ufw allow 22/tcp
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw deny 8000/tcp
+```
+
+#### 6) 证书续签与巡检
+
+Let's Encrypt 自动续签通常由 systemd timer 托管，建议加一次演练：
+
+```bash
+sudo certbot renew --dry-run
+```
+
+建议日常巡检：
+
+```bash
+sudo systemctl status moneyapp
+sudo systemctl status nginx
+sudo journalctl -u moneyapp -n 100 --no-pager
+curl -sS https://api.example.com/api/v1/health
+```
+
+#### 7) 客户端地址建议
+
+- Android / Windows 桌面端统一填：
+  - `https://api.example.com/`
+- 若仍使用公网 IP + HTTP（临时阶段）：
+  - `http://公网IP:8000/`
+
 ### 手机 App 联调
 
-- 首页后端地址改成：`http://公网IP:8000/`
+- 首页后端地址改成：`http://公网IP:8000/`（默认值可改为你自己的服务器地址，例如 `http://183.62.173.178:8000/`）
 - 先点 `情绪信号`
 - 再点 `一进二选股`、`弱转强选股`、`Top5 推荐`
 - 若页面显示旧结果，优先在结果页点击 `刷新`，避免命中 `2` 小时客户端缓存
@@ -260,7 +421,7 @@ sudo systemctl restart moneyapp
 
 首页支持填写后端地址：
 
-- Android 模拟器默认填写：`http://10.0.2.2:8000/`
+- 当前默认填写：`http://183.62.173.178:8000/`
 - 真机调试时，请改成你电脑在局域网中的 IP，例如：`http://192.168.1.10:8000/`
 
 ### 已产出 APK
@@ -283,7 +444,7 @@ sudo systemctl restart moneyapp
 
 ### 交易日说明
 
-- 可留空，默认使用今天
+- 默认自动填写当天日期（`yyyy-MM-dd`）
 - 也可手动输入：
   - `YYYY-MM-DD`
   - `YYYYMMDD`
@@ -306,3 +467,39 @@ sudo systemctl restart moneyapp
 - 若手机未连接到电脑后端所在局域网，或首页后端地址未改成电脑 IP，请求会失败
 - `弱转强` 在某些交易日返回空结果，可能代表当日确实无符合规则标的，不一定是接口异常
 - 当前发布证书已在本机生成并用于持续打包；若后续迁移电脑或长期分发，需要妥善备份 `keystore`
+
+## Windows Desktop EXE
+
+当前仓库已经可以生成一个可在 Win10 上运行的桌面端 exe：
+
+```powershell
+.\windows-mfc\build-winforms.bat
+```
+
+产物路径：
+
+```text
+windows-mfc\build-winforms\MoneyAppDesktop.exe
+```
+
+运行前请先启动后端，并确认以下地址可访问：
+
+- `http://127.0.0.1:8000/health`
+- `http://127.0.0.1:8000/api/v1/health`
+
+> 说明：新版桌面端壳页面默认从本地 `web/desktop-shell/index.html`（`file://`）加载，不再要求服务器必须暴露 `/desktop-shell/` 静态页面。
+
+桌面端目前已具备与 Android 对齐的四个入口：
+
+- `情绪信号`
+- `一进二选股`
+- `弱转强选股`
+- `Top5 推荐`
+
+并带有桌面增强能力：
+
+- 请求耗时
+- 缓存命中状态
+- 数据来源/降级状态
+- 请求历史
+- 宿主日志

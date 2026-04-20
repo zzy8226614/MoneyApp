@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from .routes.screening import router as screening_router
+from .routes.v1_screening import router as screening_v1_router
 
 app = FastAPI(
     title="MoneyAPP Screener API",
-    description="Android screener backend powered by FastAPI and Akshare.",
-    version="0.1.0",
+    description="Multi-client screener backend powered by FastAPI and Akshare.",
+    version="1.0.0",
 )
 
 app.add_middleware(
@@ -26,3 +30,12 @@ def health() -> dict[str, str]:
 
 
 app.include_router(screening_router)
+app.include_router(screening_v1_router)
+
+desktop_shell_dir = Path(__file__).resolve().parents[2] / "web" / "desktop-shell"
+if desktop_shell_dir.exists():
+    app.mount(
+        "/desktop-shell",
+        StaticFiles(directory=desktop_shell_dir, html=True),
+        name="desktop-shell",
+    )

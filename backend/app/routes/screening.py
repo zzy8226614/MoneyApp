@@ -15,6 +15,7 @@ def screen_first_board(request: ScreeningRequest) -> ScreeningResponse:
         return service.screen_first_board(
             trade_date=request.trade_date,
             use_demo_on_failure=request.use_demo_on_failure,
+            force_refresh=request.force_refresh,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -26,6 +27,7 @@ def screen_weak_to_strong(request: ScreeningRequest) -> ScreeningResponse:
         return service.screen_weak_to_strong(
             trade_date=request.trade_date,
             use_demo_on_failure=request.use_demo_on_failure,
+            force_refresh=request.force_refresh,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -37,6 +39,7 @@ def screen_top5(request: ScreeningRequest) -> ScreeningResponse:
         return service.screen_top5(
             trade_date=request.trade_date,
             use_demo_on_failure=request.use_demo_on_failure,
+            force_refresh=request.force_refresh,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -48,6 +51,7 @@ def market_signal(request: ScreeningRequest) -> MarketSignalResponse:
         return service.build_market_signal(
             trade_date=request.trade_date,
             use_demo_on_failure=request.use_demo_on_failure,
+            force_refresh=request.force_refresh,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

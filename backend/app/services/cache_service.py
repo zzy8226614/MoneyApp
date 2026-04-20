@@ -14,6 +14,9 @@ class JsonCacheService:
         safe_key = key.replace("/", "_").replace("\\", "_").replace(":", "_")
         return self.cache_dir / f"{safe_key}.json"
 
+    def exists(self, key: str) -> bool:
+        return self._path(key).exists()
+
     def load(self, key: str) -> Any | None:
         path = self._path(key)
         if not path.exists():

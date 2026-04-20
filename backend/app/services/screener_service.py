@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
+import os
 
 import pandas as pd
 
@@ -34,10 +36,15 @@ class ScreenerService:
     def __init__(self, data_service: AkshareDataService | None = None) -> None:
         self.data_service = data_service or AkshareDataService()
 
-    def screen_first_board(self, trade_date: str | None, use_demo_on_failure: bool) -> ScreeningResponse:
+    def screen_first_board(
+        self,
+        trade_date: str | None,
+        use_demo_on_failure: bool,
+        force_refresh: bool = False,
+    ) -> ScreeningResponse:
         try:
-            dataset = self.data_service.get_market_dataset(trade_date)
-            first_board_result = self._build_first_board_items(dataset)
+            dataset = self.data_service.get_market_dataset(trade_date, force_refresh=force_refresh)
+            first_board_result = self._build_first_board_items(dataset, force_refresh=force_refresh)
             items = first_board_result.items
             if self._should_use_demo(dataset, items) and use_demo_on_failure:
                 return build_demo_first_board(dataset.trade_date)
@@ -57,9 +64,14 @@ class ScreenerService:
                 return build_demo_first_board(self._normalize_date(trade_date))
             raise RuntimeError(f"Failed to screen first-board pool: {exc}") from exc
 
-    def screen_weak_to_strong(self, trade_date: str | None, use_demo_on_failure: bool) -> ScreeningResponse:
+    def screen_weak_to_strong(
+        self,
+        trade_date: str | None,
+        use_demo_on_failure: bool,
+        force_refresh: bool = False,
+    ) -> ScreeningResponse:
         try:
-            dataset = self.data_service.get_market_dataset(trade_date)
+            dataset = self.data_service.get_market_dataset(trade_date, force_refresh=force_refresh)
             weak_to_strong_result = self._build_weak_to_strong_items(dataset)
             items = weak_to_strong_result.items
             if self._should_use_demo(dataset, items) and use_demo_on_failure:
@@ -72,7 +84,15 @@ class ScreenerService:
                     len(items),
                     extra_notes=weak_to_strong_result.notes,
                 ),
-                items=sorted(items, key=lambda item: item.totalScore, reverse=True),
+                items=sorted(
+                    items,
+                    key=lambda item: (
+                        item.totalScore if item.totalScore is not None else 0.0,
+                        item.boardLimitUpCount,
+                        -item.boardRank,
+                    ),
+                    reverse=True,
+                ),
                 error=None,
             )
         except Exception as exc:
@@ -80,10 +100,15 @@ class ScreenerService:
                 return build_demo_weak_to_strong(self._normalize_date(trade_date))
             raise RuntimeError(f"Failed to screen weak-to-strong pool: {exc}") from exc
 
-    def screen_top5(self, trade_date: str | None, use_demo_on_failure: bool) -> ScreeningResponse:
+    def screen_top5(
+        self,
+        trade_date: str | None,
+        use_demo_on_failure: bool,
+        force_refresh: bool = False,
+    ) -> ScreeningResponse:
         try:
-            dataset = self.data_service.get_market_dataset(trade_date)
-            first_board_result = self._build_first_board_items(dataset)
+            dataset = self.data_service.get_market_dataset(trade_date, force_refresh=force_refresh)
+            first_board_result = self._build_first_board_items(dataset, force_refresh=force_refresh)
             weak_to_strong_result = self._build_weak_to_strong_items(dataset)
             first_board_items = first_board_result.items
             weak_to_strong_items = weak_to_strong_result.items
@@ -111,7 +136,15 @@ class ScreenerService:
                         len(weak_to_strong_items),
                         extra_notes=weak_to_strong_result.notes,
                     ),
-                    items=sorted(weak_to_strong_items, key=lambda item: item.totalScore, reverse=True),
+                    items=sorted(
+                        weak_to_strong_items,
+                        key=lambda item: (
+                            item.totalScore if item.totalScore is not None else 0.0,
+                            item.boardLimitUpCount,
+                            -item.boardRank,
+                        ),
+                        reverse=True,
+                    ),
                     error=None,
                 )
         except Exception as exc:
@@ -154,11 +187,34 @@ class ScreenerService:
             error=None,
         )
 
-    def build_market_signal(self, trade_date: str | None, use_demo_on_failure: bool) -> MarketSignalResponse:
+    def build_market_signal(
+        self,
+        trade_date: str | None,
+        use_demo_on_failure: bool,
+        force_refresh: bool = False,
+    ) -> MarketSignalResponse:
         try:
-            dataset = self.data_service.get_market_dataset(trade_date)
-            limit_down_pool = self.data_service.get_limit_down_pool(trade_date)
-            market_snapshot = self.data_service.get_market_overview(trade_date)
+            # Core signal data paths run in parallel to avoid serial blocking on force refresh.
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                dataset_future = executor.submit(
+                    self.data_service.get_market_dataset,
+                    trade_date,
+                    force_refresh,
+                )
+                limit_down_future = executor.submit(
+                    self.data_service.get_limit_down_pool,
+                    trade_date,
+                    force_refresh,
+                )
+                dataset = dataset_future.result()
+                limit_down_pool = limit_down_future.result()
+
+            # Index overview is辅助展示信息; keep it cache-first even on force refresh
+            # to avoid long blocking tails from multiple upstream index endpoints.
+            market_snapshot = self.data_service.get_market_overview(
+                trade_date,
+                force_refresh=False,
+            )
 
             limit_up_count = int(len(dataset.limit_up_pool.index))
             highest_board_row = self._highest_board_row(dataset.limit_up_pool)
@@ -233,7 +289,11 @@ class ScreenerService:
                 )
             raise RuntimeError(f"Failed to build market signal: {exc}") from exc
 
-    def _build_first_board_items(self, dataset: MarketDataset) -> ScreeningBuildResult:
+    def _build_first_board_items(
+        self,
+        dataset: MarketDataset,
+        force_refresh: bool = False,
+    ) -> ScreeningBuildResult:
         if dataset.limit_up_pool.empty:
             return ScreeningBuildResult(items=[], notes=[])
         context = self._build_candidate_context(dataset)
@@ -241,12 +301,30 @@ class ScreenerService:
         if "连板数" not in frame.columns:
             return ScreeningBuildResult(items=[], notes=[])
         frame = frame[frame["连板数"].fillna(0).astype(int) == 1]
+        history_filter_map, history_fetch_failed_symbols = self._prefetch_history_filters(
+            frame=frame,
+            trade_date=dataset.trade_date,
+            force_refresh=force_refresh,
+        )
         items: list[ScreeningItem] = []
+        skipped_history_count = 0
         for _, row in frame.iterrows():
-            item, history_filter_skipped = self._screen_first_board_row(row, dataset.trade_date, context)
+            item, history_filter_skipped = self._screen_first_board_row(
+                row,
+                dataset.trade_date,
+                context,
+                force_refresh=force_refresh,
+                history_filter_map=history_filter_map,
+                history_fetch_failed_symbols=history_fetch_failed_symbols,
+            )
+            if history_filter_skipped:
+                skipped_history_count += 1
             if item is not None:
                 items.append(item)
-        return ScreeningBuildResult(items=items, notes=[])
+        notes: list[str] = []
+        if skipped_history_count > 0:
+            notes.append(f"{skipped_history_count} 只个股历史行情不可用，已跳过历史过滤条件。")
+        return ScreeningBuildResult(items=items, notes=notes)
 
     def _build_weak_to_strong_items(self, dataset: MarketDataset) -> ScreeningBuildResult:
         if dataset.limit_up_pool.empty:
@@ -268,6 +346,9 @@ class ScreenerService:
         row: pd.Series,
         trade_date: str,
         context: CandidateContext,
+        force_refresh: bool = False,
+        history_filter_map: dict[str, bool] | None = None,
+        history_fetch_failed_symbols: set[str] | None = None,
     ) -> tuple[ScreeningItem | None, bool]:
         name = str(row.get("名称", "")).strip()
         symbol = str(row.get("代码", "")).strip()
@@ -279,12 +360,25 @@ class ScreenerService:
         if float_market_cap_yi < 20 or float_market_cap_yi > 200:
             return None, False
         history_filter_skipped = False
-        try:
-            history = self.data_service.get_stock_history(symbol=symbol, trade_date=trade_date)
-            if not self._passes_history_filters(history):
-                return None, False
-        except Exception:
+        if history_fetch_failed_symbols is not None and symbol in history_fetch_failed_symbols:
             history_filter_skipped = True
+        elif history_filter_map is not None:
+            if not history_filter_map.get(symbol, False):
+                return None, False
+        else:
+            try:
+                history = self.data_service.get_stock_history(
+                    symbol=symbol,
+                    trade_date=trade_date,
+                    force_refresh=force_refresh,
+                    allow_live_fetch=force_refresh,
+                )
+                if history.empty:
+                    history_filter_skipped = True
+                elif not self._passes_history_filters(history):
+                    return None, False
+            except Exception:
+                history_filter_skipped = True
 
         turnover = self._to_float(row.get("换手率"))
         seal_funds = self._to_float(row.get("封板资金"))
@@ -327,6 +421,57 @@ class ScreenerService:
             history_filter_skipped,
         )
 
+    def _prefetch_history_filters(
+        self,
+        frame: pd.DataFrame,
+        trade_date: str,
+        force_refresh: bool,
+    ) -> tuple[dict[str, bool], set[str]]:
+        symbols = {
+            str(value).strip()
+            for value in frame.get("代码", pd.Series(dtype=object)).tolist()
+            if str(value).strip()
+        }
+        if not symbols:
+            return {}, set()
+
+        max_workers = min(8, max(2, (os.cpu_count() or 4)))
+        history_filter_map: dict[str, bool] = {}
+        failed_symbols: set[str] = set()
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(
+                    self._load_history_filter_passed,
+                    symbol,
+                    trade_date,
+                    force_refresh,
+                ): symbol
+                for symbol in symbols
+            }
+            for future in as_completed(future_map):
+                symbol = future_map[future]
+                try:
+                    history_filter_map[symbol] = future.result()
+                except Exception:
+                    failed_symbols.add(symbol)
+        return history_filter_map, failed_symbols
+
+    def _load_history_filter_passed(
+        self,
+        symbol: str,
+        trade_date: str,
+        force_refresh: bool,
+    ) -> bool:
+        history = self.data_service.get_stock_history(
+            symbol=symbol,
+            trade_date=trade_date,
+            force_refresh=force_refresh,
+            allow_live_fetch=force_refresh,
+        )
+        if history.empty:
+            return True
+        return self._passes_history_filters(history)
+
     def _screen_weak_to_strong_row(
         self,
         row: pd.Series,
@@ -341,13 +486,13 @@ class ScreenerService:
         board_name = self._board_name(row)
         board_count = context.board_counts.get(board_name, 0)
         board_rank = context.board_ranks.get(board_name, 0)
-        if board_count < 2:
+        if board_count < 1:
             return None
         float_market_cap_yi = self._to_yi(row.get("流通市值"))
         if float_market_cap_yi < 20 or float_market_cap_yi > 200:
             return None
         turnover = self._to_float(row.get("换手率"))
-        if turnover < 5 or turnover > 15:
+        if turnover < 3 or turnover > 20:
             return None
         first_time = self._format_time(row.get("首次封板时间"))
         last_time = self._format_time(row.get("最后封板时间"))
