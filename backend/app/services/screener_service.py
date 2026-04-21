@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 import os
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -16,6 +17,10 @@ from ..models.schemas import (
     ScreeningResponse,
 )
 from .akshare_service import AkshareDataService, MarketDataset
+
+CN_TZ = ZoneInfo("Asia/Shanghai")
+MIN_CANDIDATE_PRICE = 2.0
+MAX_CANDIDATE_PRICE = 40.0
 
 
 @dataclass
@@ -42,6 +47,9 @@ class ScreenerService:
         use_demo_on_failure: bool,
         force_refresh: bool = False,
     ) -> ScreeningResponse:
+        guard_response = self._screening_trade_date_guard(trade_date)
+        if guard_response is not None:
+            return guard_response
         try:
             dataset = self.data_service.get_market_dataset(trade_date, force_refresh=force_refresh)
             first_board_result = self._build_first_board_items(dataset, force_refresh=force_refresh)
@@ -70,6 +78,9 @@ class ScreenerService:
         use_demo_on_failure: bool,
         force_refresh: bool = False,
     ) -> ScreeningResponse:
+        guard_response = self._screening_trade_date_guard(trade_date)
+        if guard_response is not None:
+            return guard_response
         try:
             dataset = self.data_service.get_market_dataset(trade_date, force_refresh=force_refresh)
             weak_to_strong_result = self._build_weak_to_strong_items(dataset)
@@ -106,6 +117,9 @@ class ScreenerService:
         use_demo_on_failure: bool,
         force_refresh: bool = False,
     ) -> ScreeningResponse:
+        guard_response = self._screening_trade_date_guard(trade_date)
+        if guard_response is not None:
+            return guard_response
         try:
             dataset = self.data_service.get_market_dataset(trade_date, force_refresh=force_refresh)
             first_board_result = self._build_first_board_items(dataset, force_refresh=force_refresh)
@@ -193,6 +207,21 @@ class ScreenerService:
         use_demo_on_failure: bool,
         force_refresh: bool = False,
     ) -> MarketSignalResponse:
+        normalized_date = self._normalize_date(trade_date)
+        today = datetime.now(CN_TZ).strftime("%Y-%m-%d")
+        if normalized_date > today:
+            return MarketSignalResponse(
+                trade_date=normalized_date,
+                weekday=self._weekday_label(normalized_date),
+                marketOverview="请求交易日尚未到达，暂无可用收盘数据。",
+                turnoverOverview="请求交易日尚未到达，暂无可用沪深京成交额收盘数据。",
+                regime="YELLOW",
+                regimeLabel="黄灯",
+                positionAdvice="请求日期为未来交易日，建议等待收盘后再查询。",
+                indicators=[],
+                notes=["未来交易日不返回历史缓存回填结果。"],
+                error=None,
+            )
         try:
             # Core signal data paths run in parallel to avoid serial blocking on force refresh.
             with ThreadPoolExecutor(max_workers=2) as executor:
@@ -209,12 +238,25 @@ class ScreenerService:
                 dataset = dataset_future.result()
                 limit_down_pool = limit_down_future.result()
 
-            # Index overview is辅助展示信息; keep it cache-first even on force refresh
-            # to avoid long blocking tails from multiple upstream index endpoints.
+            # Respect force_refresh to avoid serving stale same-day index snapshots
+            # captured before market close.
             market_snapshot = self.data_service.get_market_overview(
                 trade_date,
-                force_refresh=False,
+                force_refresh=force_refresh,
             )
+            if not market_snapshot.has_valid_close:
+                return MarketSignalResponse(
+                    trade_date=normalized_date,
+                    weekday=self._weekday_label(normalized_date),
+                    marketOverview=market_snapshot.market_overview,
+                    turnoverOverview=market_snapshot.turnover_overview,
+                    regime="YELLOW",
+                    regimeLabel="黄灯",
+                    positionAdvice="当日未收盘，建议仅观察，不执行收盘后策略。",
+                    indicators=[],
+                    notes=list(market_snapshot.notes),
+                    error=None,
+                )
 
             limit_up_count = int(len(dataset.limit_up_pool.index))
             highest_board_row = self._highest_board_row(dataset.limit_up_pool)
@@ -387,6 +429,8 @@ class ScreenerService:
         board_rank = context.board_ranks.get(board_name, 0)
         seal_time = self._format_time(row.get("首次封板时间"))
         latest_price = self._to_float(row.get("最新价"))
+        if latest_price < MIN_CANDIDATE_PRICE or latest_price > MAX_CANDIDATE_PRICE:
+            return None, history_filter_skipped
         seal_order_lots = self._format_seal_order_lots(seal_funds, latest_price)
         open_board_count = int(self._to_float(row.get("炸板次数")))
 
@@ -504,6 +548,8 @@ class ScreenerService:
         seal_funds = self._to_float(row.get("封板资金"))
         board_strength = context.board_strength.get(board_name, 0.0)
         latest_price = self._to_float(row.get("最新价"))
+        if latest_price < MIN_CANDIDATE_PRICE or latest_price > MAX_CANDIDATE_PRICE:
+            return None
         is_limit_up = self._to_float(row.get("涨跌幅")) >= 9.5
 
         return ScreeningItem(
@@ -689,10 +735,44 @@ class ScreenerService:
     @staticmethod
     def _normalize_date(trade_date: str | None) -> str:
         if not trade_date:
-            return pd.Timestamp.now().strftime("%Y-%m-%d")
+            return datetime.now(CN_TZ).strftime("%Y-%m-%d")
         if "-" in trade_date:
             return trade_date
         return f"{trade_date[0:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
+
+    def _screening_trade_date_guard(self, trade_date: str | None) -> ScreeningResponse | None:
+        normalized_date = self._normalize_date(trade_date)
+        now = datetime.now(CN_TZ)
+        today = now.strftime("%Y-%m-%d")
+        if normalized_date > today:
+            return self._empty_screening_response(
+                normalized_date,
+                "请求交易日尚未到达，暂无可用收盘数据。",
+                "未来交易日不返回历史缓存回填结果。",
+            )
+        if normalized_date == today and now.hour < 15:
+            return self._empty_screening_response(
+                normalized_date,
+                "当日尚未收盘，暂无可用收盘数据。",
+                "交易日未收盘，已停止使用昨日缓存/历史数据回填。",
+            )
+        return None
+
+    @staticmethod
+    def _empty_screening_response(trade_date: str, title_note: str, detail_note: str) -> ScreeningResponse:
+        return ScreeningResponse(
+            trade_date=trade_date,
+            market_summary=MarketSummary(
+                tradeDate=trade_date,
+                limitUpCount=0,
+                firstBoardCount=0,
+                weakToStrongCount=0,
+                source="guard",
+                notes=[title_note, detail_note],
+            ),
+            items=[],
+            error=None,
+        )
 
     @staticmethod
     def _with_recommendation_score(item: ScreeningItem) -> ScreeningItem:
@@ -771,15 +851,11 @@ class ScreenerService:
         promotion_rate: float,
         has_limit_down_wave: bool,
     ) -> str:
-        if (
-            limit_up_count > 60
-            and highest_board >= 5
-            and promotion_rate > 0.25
-        ):
+        if limit_up_count < 40 or highest_board < 4 or has_limit_down_wave:
+            return "RED"
+        if limit_up_count > 60 and highest_board >= 5 and promotion_rate > 0.25:
             return "GREEN"
-        if 40 <= limit_up_count <= 60 and highest_board >= 4 and promotion_rate <= 0.25 and not has_limit_down_wave:
-            return "YELLOW"
-        return "RED"
+        return "YELLOW"
 
     @staticmethod
     def _regime_label(regime: str) -> str:

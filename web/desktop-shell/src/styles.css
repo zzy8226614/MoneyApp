@@ -466,11 +466,44 @@ pre {
 }
 
 .indicator-row {
-  display: grid;
-  grid-template-columns: 1.1fr 1.2fr 1.4fr 0.7fr;
-  gap: 8px;
-  padding: 10px 0;
+  /* IE/WebBrowser 兼容：不用 grid，改为 flex 单行四列 */
+  display: -ms-flexbox;
+  display: flex;
+  -ms-flex-wrap: nowrap;
+  flex-wrap: nowrap;
+  padding: 8px 0;
   border-bottom: 1px solid #334155;
+}
+
+.indicator-row > div {
+  min-width: 0;
+  padding-right: 8px;
+  line-height: 1.35;
+}
+
+.indicator-row > div:nth-child(1) {
+  -ms-flex: 0 0 20%;
+  flex: 0 0 20%;
+  width: 20%;
+}
+
+.indicator-row > div:nth-child(2) {
+  -ms-flex: 0 0 30%;
+  flex: 0 0 30%;
+  width: 30%;
+}
+
+.indicator-row > div:nth-child(3) {
+  -ms-flex: 0 0 38%;
+  flex: 0 0 38%;
+  width: 38%;
+}
+
+.indicator-row > div:nth-child(4) {
+  -ms-flex: 0 0 12%;
+  flex: 0 0 12%;
+  width: 12%;
+  padding-right: 0;
 }
 
 .indicator-row:last-child {

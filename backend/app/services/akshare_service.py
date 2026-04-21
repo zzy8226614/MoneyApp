@@ -4,18 +4,26 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from zoneinfo import ZoneInfo
 
 import akshare as ak
 import pandas as pd
+import re
 
 from .cache_service import JsonCacheService
+
+CN_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _cn_now() -> datetime:
+    return datetime.now(CN_TZ)
 
 
 def _normalize_trade_date(trade_date: str | None) -> tuple[str, str]:
     if trade_date:
         cleaned = trade_date.replace("-", "")
     else:
-        cleaned = datetime.now().strftime("%Y%m%d")
+        cleaned = _cn_now().strftime("%Y%m%d")
     pretty = f"{cleaned[0:4]}-{cleaned[4:6]}-{cleaned[6:8]}"
     return cleaned, pretty
 
@@ -34,6 +42,7 @@ class MarketOverviewSnapshot:
     market_overview: str
     turnover_overview: str
     notes: list[str]
+    has_valid_close: bool
 
 
 class AkshareDataService:
@@ -49,14 +58,19 @@ class AkshareDataService:
         self.fetch_timeout_seconds = fetch_timeout_seconds
         self._fetch_executor = ThreadPoolExecutor(max_workers=8)
 
-    def _fetch_with_timeout(self, fetcher: Callable[[], pd.DataFrame]) -> pd.DataFrame:
+    def _fetch_with_timeout(
+        self,
+        fetcher: Callable[[], pd.DataFrame],
+        timeout_seconds: float | None = None,
+    ) -> pd.DataFrame:
+        effective_timeout = timeout_seconds or self.fetch_timeout_seconds
         future = self._fetch_executor.submit(fetcher)
         try:
-            return future.result(timeout=self.fetch_timeout_seconds)
+            return future.result(timeout=effective_timeout)
         except FutureTimeoutError as exc:
             future.cancel()
             raise TimeoutError(
-                f"Akshare fetch timeout after {self.fetch_timeout_seconds:.1f}s"
+                f"Akshare fetch timeout after {effective_timeout:.1f}s"
             ) from exc
 
     def _run_with_cache(
@@ -65,6 +79,7 @@ class AkshareDataService:
         fetcher: Callable[[], pd.DataFrame],
         force_refresh: bool = False,
         allow_live_fetch: bool = True,
+        timeout_seconds: float | None = None,
     ) -> tuple[pd.DataFrame, str]:
         if not force_refresh:
             in_memory = self._memory_cache.get(cache_key)
@@ -82,7 +97,7 @@ class AkshareDataService:
         last_error: Exception | None = None
         for _ in range(self.max_retries):
             try:
-                frame = self._fetch_with_timeout(fetcher)
+                frame = self._fetch_with_timeout(fetcher, timeout_seconds=timeout_seconds)
                 if frame is not None and not frame.empty:
                     records = frame.to_dict(orient="records")
                     self.cache_service.save(cache_key, records)
@@ -179,27 +194,49 @@ class AkshareDataService:
         force_refresh: bool = False,
     ) -> MarketOverviewSnapshot:
         compact_date, pretty_date = _normalize_trade_date(trade_date)
+        now = _cn_now()
+        is_today = pretty_date == now.strftime("%Y-%m-%d")
+        # For today's request before market close, do not backfill yesterday's close.
+        if is_today and now.hour < 15:
+            return MarketOverviewSnapshot(
+                market_overview="当日尚未收盘，暂无可用指数收盘数据。",
+                turnover_overview="当日尚未收盘，暂无可用沪深京成交额收盘数据。",
+                notes=["交易日未收盘，已停止使用昨日缓存/历史数据回填。"],
+                has_valid_close=False,
+            )
+
         notes: list[str] = []
         snapshots: list[dict[str, float | str]] = []
         cached_indexes: list[str] = []
-        for display_name, symbol in (
+        index_defs = (
             ("沪指", "sh000001"),
             ("深成指", "sz399001"),
             ("创业板指", "sz399006"),
-        ):
-            try:
-                index_frame, source = self._run_with_cache(
-                    f"index_daily_tx_{symbol}_{compact_date}",
-                    lambda symbol=symbol: ak.stock_zh_index_daily_tx(symbol=symbol),
-                    force_refresh=force_refresh,
-                )
-                if source == "cache":
-                    cached_indexes.append(display_name)
-                snapshot = self._extract_index_snapshot(index_frame, pretty_date, display_name)
-                if snapshot is not None:
-                    snapshots.append(snapshot)
-            except Exception:  # pragma: no cover - network dependent
+        )
+        # Tencent index daily endpoint can be slow/unstable; use longer timeout and one retry per index.
+        index_timeout = max(self.fetch_timeout_seconds, 45.0)
+        for display_name, symbol in index_defs:
+            index_frame: pd.DataFrame | None = None
+            source = "empty"
+            for _ in range(2):
+                try:
+                    index_frame, source = self._run_with_cache(
+                        f"index_daily_tx_{symbol}_{compact_date}",
+                        (lambda symbol=symbol: ak.stock_zh_index_daily_tx(symbol=symbol)),
+                        force_refresh=force_refresh,
+                        timeout_seconds=index_timeout,
+                    )
+                    break
+                except Exception:  # pragma: no cover - network dependent
+                    index_frame = None
+                    continue
+            if index_frame is None:
                 continue
+            if source == "cache":
+                cached_indexes.append(display_name)
+            snapshot = self._extract_index_snapshot(index_frame, pretty_date, display_name)
+            if snapshot is not None:
+                snapshots.append(snapshot)
 
         if cached_indexes:
             notes.append(f"部分指数行情来自本地缓存：{'、'.join(cached_indexes)}。")
@@ -207,15 +244,18 @@ class AkshareDataService:
             notes.append("部分指数行情获取失败，已使用可用指数样本继续生成情绪信号。")
 
         market_overview = self._format_index_overview(snapshots)
-        turnover_overview = self._format_turnover_overview(snapshots)
+        turnover_overview = self._format_total_turnover_overview(pretty_date, force_refresh=force_refresh)
         if turnover_overview != "成交额暂不可用。":
-            notes.append("成交额采用沪指、深成指、创业板指样本汇总口径。")
+            notes.append("成交额采用沪深京总成交额口径。")
+        else:
+            notes.append("成交额主口径暂不可用，未展示非同口径降级值。")
         if market_overview == "指数行情暂不可用。" and turnover_overview == "成交额暂不可用。":
             notes.append("指数行情暂不可用，已仅基于涨停/跌停/连板指标生成情绪信号。")
         return MarketOverviewSnapshot(
             market_overview=market_overview,
             turnover_overview=turnover_overview,
             notes=notes,
+            has_valid_close=bool(snapshots),
         )
 
     @staticmethod
@@ -232,10 +272,10 @@ class AkshareDataService:
         if frame.empty:
             return None
         target_date = pd.Timestamp(trade_date)
-        eligible = frame[frame["date"] <= target_date]
-        if eligible.empty:
+        exact_day = frame[frame["date"] == target_date]
+        if exact_day.empty:
             return None
-        current_idx = eligible.index[-1]
+        current_idx = exact_day.index[-1]
         current_pos = frame.index.get_loc(current_idx)
         if current_pos == 0:
             return None
@@ -257,6 +297,66 @@ class AkshareDataService:
             "amount": float(amount) if not pd.isna(amount) else 0.0,
             "amount_change": amount_change,
         }
+
+    def _format_total_turnover_overview(self, trade_date: str, force_refresh: bool = False) -> str:
+        compact_date = trade_date.replace("-", "")
+        spot_frame = pd.DataFrame()
+        # Full-market spot endpoint is unstable in some networks; retry a few
+        # times before declaring unavailable.
+        for _ in range(3):
+            try:
+                spot_frame, _ = self._run_with_cache(
+                    f"a_spot_total_turnover_{compact_date}",
+                    lambda: ak.stock_zh_a_spot_em(),
+                    force_refresh=force_refresh,
+                    timeout_seconds=max(self.fetch_timeout_seconds, 25.0),
+                )
+                if not spot_frame.empty:
+                    break
+            except Exception:
+                spot_frame = pd.DataFrame()
+                continue
+        if not spot_frame.empty and "成交额" in spot_frame.columns:
+            amount_series = pd.to_numeric(spot_frame["成交额"], errors="coerce").fillna(0)
+            total_amount = float(amount_series.sum())
+            if total_amount > 0:
+                return f"{total_amount / 1_000_000_000_000:.2f}万亿"
+        legu_amount = self._read_turnover_from_legu(compact_date, force_refresh=force_refresh)
+        if legu_amount > 0:
+            return f"{legu_amount / 1_000_000_000_000:.2f}万亿"
+        return "成交额暂不可用。"
+
+    def _read_turnover_from_legu(self, compact_date: str, force_refresh: bool = False) -> float:
+        try:
+            legu_frame, _ = self._run_with_cache(
+                f"market_activity_legu_{compact_date}",
+                lambda: ak.stock_market_activity_legu(),
+                force_refresh=force_refresh,
+                timeout_seconds=max(self.fetch_timeout_seconds, 15.0),
+            )
+        except Exception:
+            return 0.0
+        if legu_frame.empty or "item" not in legu_frame.columns or "value" not in legu_frame.columns:
+            return 0.0
+        for _, row in legu_frame.iterrows():
+            item_text = str(row.get("item", "")).strip()
+            value_text = str(row.get("value", "")).strip()
+            if not item_text or not value_text:
+                continue
+            if "%" in value_text or ":" in value_text:
+                continue
+            if ("成交额" not in item_text) and ("成交" not in item_text) and ("金额" not in item_text):
+                continue
+            match = re.search(r"[-+]?\d+(?:\.\d+)?", value_text)
+            if not match:
+                continue
+            numeric = float(match.group(0))
+            if "万亿" in value_text:
+                return numeric * 1_000_000_000_000
+            if "亿" in value_text:
+                return numeric * 100_000_000
+            return numeric * 100_000_000
+        return 0.0
 
     @staticmethod
     def _format_index_overview(index_snapshots: list[dict[str, float | str]]) -> str:

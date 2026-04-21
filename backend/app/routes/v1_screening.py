@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Callable
 from uuid import uuid4
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Header, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -27,6 +28,7 @@ from ..services.screener_service import ScreenerService
 router = APIRouter(prefix="/api/v1", tags=["screening-v1"])
 service = ScreenerService()
 response_cache = JsonCacheService()
+CN_TZ = ZoneInfo("Asia/Shanghai")
 
 CLIENT_ALIASES: dict[str, ClientType] = {
     "android": "android",
@@ -61,7 +63,7 @@ def _response_source_from_text(source_text: str | None) -> ResponseSource:
 
 def _normalized_trade_date_key(trade_date: str | None) -> str:
     if not trade_date:
-        return datetime.now().strftime("%Y%m%d")
+        return datetime.now(CN_TZ).strftime("%Y%m%d")
     return trade_date.replace("-", "")
 
 
@@ -150,8 +152,9 @@ def _execute_screening(
             detail=str(exc),
             context=client_context,
         )
-    if not request.force_refresh:
-        response_cache.save(cache_key, result.model_dump())
+    # Always refresh cache with latest successful payload so force_refresh
+    # can heal stale same-day cached responses for later normal requests.
+    response_cache.save(cache_key, result.model_dump())
     meta = _screening_meta(result, client_context)
     return response_factory(result, meta)
 
@@ -274,8 +277,9 @@ def market_signal_v1(
             detail=str(exc),
             context=context,
         )
-    if not payload.force_refresh:
-        response_cache.save(cache_key, result.model_dump())
+    # Always refresh cache with latest successful payload so force_refresh
+    # can heal stale same-day cached responses for later normal requests.
+    response_cache.save(cache_key, result.model_dump())
     return ApiV1MarketSignalEnvelope(
         data=result,
         meta=_market_signal_meta(result, context),

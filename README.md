@@ -19,6 +19,7 @@
 - 执行路径：
   - 通过 `Akshare` 获取当日涨停池、历史日线与板块数据
   - 按一进二硬性条件过滤
+  - 新增硬性价格条件：`2元 <= 最新价 <= 40元`
   - 按评分机制排序
   - 返回并展示以下字段：
   - `股票名称`
@@ -37,6 +38,7 @@
 - 按按钮触发后调用后端 `POST /screen/weak-to-strong`
 - 筛选 `>=2板 且 <5板` 的弱转强候选
 - 排除创业板 `300`、科创板、北交所与 `ST`
+- 新增硬性价格条件：`2元 <= 最新价 <= 40元`
 - 返回更精简的展示字段：
   - `股票名称`
   - `流通市值`
@@ -448,6 +450,8 @@ curl -sS https://api.example.com/api/v1/health
 - 也可手动输入：
   - `YYYY-MM-DD`
   - `YYYYMMDD`
+- 当 `trade_date` 为未来日期时，`情绪信号`、`一进二选股`、`弱转强选股`、`Top5 推荐` 都会直接返回“请求交易日尚未到达，暂无可用收盘数据”，不会回填历史缓存
+- 当 `trade_date` 为当天且未收盘时，上述四个功能都会直接返回“当日尚未收盘，暂无可用收盘数据”，不会展示昨日缓存结果
 
 ## 已验证内容
 
@@ -455,6 +459,8 @@ curl -sS https://api.example.com/api/v1/health
 - `/health` 可正常返回
 - `/screen/market-signal`、`/screen/first-board`、`/screen/weak-to-strong`、`/screen/top5` 路由已实现
 - `pytest` 最小接口测试已通过
+- `market-signal` 已验证“未来日期/当日未收盘不回填历史缓存”规则
+- `first-board` / `weak-to-strong` / `top5` 已验证“未来日期不回填历史缓存”规则
 - `assembleDebug` 已成功，已生成 `app-debug.apk`
 - `assembleRelease` 已成功，已生成正式签名的 `app-release.apk`
 - Android `compileDebugKotlin` 已通过
@@ -467,6 +473,15 @@ curl -sS https://api.example.com/api/v1/health
 - 若手机未连接到电脑后端所在局域网，或首页后端地址未改成电脑 IP，请求会失败
 - `弱转强` 在某些交易日返回空结果，可能代表当日确实无符合规则标的，不一定是接口异常
 - 当前发布证书已在本机生成并用于持续打包；若后续迁移电脑或长期分发，需要妥善备份 `keystore`
+- `情绪信号` 的成交额口径已统一为“沪深京总成交额”（来源 `stock_zh_a_spot_em` 汇总）
+
+### 上游连通性诊断
+
+- 后端提供诊断接口：`GET /debug/upstream-check?timeout_seconds=12`
+- 用途：快速判断指数源、成交额源是否可达，并返回各探针耗时与错误信息
+- 排障建议：
+  - 若 `spot_a_share_turnover` 失败且错误为 `RemoteDisconnected` / `ConnectionReset`，通常是网络层拦截或上游连接被重置
+  - 若指数探针仅部分成功，优先检查当前网络质量与请求超时参数
 
 ## Windows Desktop EXE
 

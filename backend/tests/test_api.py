@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime
 import pandas as pd
 from fastapi.testclient import TestClient
 
 from backend.app.main import app
-from backend.app.services.akshare_service import MarketDataset
+from backend.app.services.akshare_service import MarketDataset, MarketOverviewSnapshot, AkshareDataService
+from backend.app.models.schemas import MarketSignalResponse
+from backend.app.routes import v1_screening
 from backend.app.services.screener_service import ScreenerService
 
 client = TestClient(app)
@@ -86,6 +89,84 @@ def test_v1_market_signal_response() -> None:
     assert "regime" in body["data"]
 
 
+def test_v1_market_signal_future_date_no_backfill() -> None:
+    response = client.post(
+        "/api/v1/screen/market-signal",
+        json={"trade_date": "2099-01-01", "use_demo_on_failure": True, "force_refresh": True},
+        headers={"X-Client-Type": "windows-mfc"},
+    )
+    body = response.json()
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert body["data"]["trade_date"] == "2099-01-01"
+    assert body["data"]["indicators"] == []
+    assert "尚未到达" in body["data"]["marketOverview"]
+    assert any("不返回历史缓存回填" in note for note in body["data"]["notes"])
+
+
+def test_v1_market_signal_unclosed_day_no_backfill(monkeypatch) -> None:
+    def fake_build_market_signal(
+        trade_date: str | None,
+        use_demo_on_failure: bool,
+        force_refresh: bool = False,
+    ) -> MarketSignalResponse:
+        return MarketSignalResponse(
+            trade_date=trade_date or "2026-04-21",
+            weekday="周二",
+            marketOverview="当日尚未收盘，暂无可用指数收盘数据。",
+            turnoverOverview="当日尚未收盘，暂无可用沪深京成交额收盘数据。",
+            regime="YELLOW",
+            regimeLabel="黄灯",
+            positionAdvice="当日未收盘，建议仅观察，不执行收盘后策略。",
+            indicators=[],
+            notes=["交易日未收盘，已停止使用昨日缓存/历史数据回填。"],
+            error=None,
+        )
+
+    monkeypatch.setattr(v1_screening.service, "build_market_signal", fake_build_market_signal)
+    response = client.post(
+        "/api/v1/screen/market-signal",
+        json={"trade_date": "2026-04-21", "use_demo_on_failure": True, "force_refresh": True},
+        headers={"X-Client-Type": "android"},
+    )
+    body = response.json()
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert body["data"]["trade_date"] == "2026-04-21"
+    assert body["data"]["indicators"] == []
+    assert "暂无可用指数收盘数据" in body["data"]["marketOverview"]
+    assert any("停止使用昨日缓存" in note for note in body["data"]["notes"])
+
+
+def test_v1_first_board_future_date_no_backfill() -> None:
+    response = client.post(
+        "/api/v1/screen/first-board",
+        json={"trade_date": "2099-01-01", "use_demo_on_failure": True, "force_refresh": True},
+        headers={"X-Client-Type": "windows-mfc"},
+    )
+    body = response.json()
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert body["data"]["trade_date"] == "2099-01-01"
+    assert body["data"]["items"] == []
+    assert any("尚未到达" in note for note in body["data"]["market_summary"]["notes"])
+    assert any("不返回历史缓存回填" in note for note in body["data"]["market_summary"]["notes"])
+
+
+def test_v1_top5_future_date_no_backfill() -> None:
+    response = client.post(
+        "/api/v1/screen/top5",
+        json={"trade_date": "2099-01-01", "use_demo_on_failure": True, "force_refresh": True},
+        headers={"X-Client-Type": "windows-mfc"},
+    )
+    body = response.json()
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert body["data"]["trade_date"] == "2099-01-01"
+    assert body["data"]["items"] == []
+    assert any("尚未到达" in note for note in body["data"]["market_summary"]["notes"])
+
+
 class EmptyDataService:
     def get_market_dataset(self, trade_date: str | None = None, force_refresh: bool = False) -> MarketDataset:
         return MarketDataset(
@@ -145,3 +226,138 @@ def test_first_board_skips_history_filter_when_history_unavailable() -> None:
     assert len(response.items) == 1
     assert any("历史行情不可用" in note for note in response.market_summary.notes)
     assert "历史日线不可用" not in response.items[0].recommendReason
+
+
+class FirstBoardPriceOutOfRangeDataService:
+    def get_market_dataset(self, trade_date: str | None = None, force_refresh: bool = False) -> MarketDataset:
+        limit_up_pool = pd.DataFrame(
+            [
+                {
+                    "名称": "低价首板",
+                    "代码": "002222",
+                    "连板数": 1,
+                    "流通市值": 66.0,
+                    "换手率": 10.5,
+                    "封板资金": 1.88,
+                    "所属行业": "电子",
+                    "首次封板时间": "094512",
+                    "最后封板时间": "094700",
+                    "炸板次数": 0,
+                    "最新价": 1.82,
+                }
+            ]
+        )
+        board_snapshot = pd.DataFrame([{"板块名称": "电子", "涨跌幅": 1.2}])
+        return MarketDataset(
+            trade_date="2026-04-15",
+            source="live",
+            limit_up_pool=limit_up_pool,
+            previous_limit_up_pool=pd.DataFrame(),
+            board_snapshot=board_snapshot,
+        )
+
+    def get_stock_history(
+        self,
+        symbol: str,
+        trade_date: str | None = None,
+        force_refresh: bool = False,
+        allow_live_fetch: bool = True,
+    ) -> pd.DataFrame:
+        return pd.DataFrame()
+
+
+def test_first_board_filters_price_outside_2_to_40() -> None:
+    service = ScreenerService(data_service=FirstBoardPriceOutOfRangeDataService())
+    response = service.screen_first_board("20260415", use_demo_on_failure=False)
+    assert response.items == []
+
+
+class WeakToStrongPriceOutOfRangeDataService:
+    def get_market_dataset(self, trade_date: str | None = None, force_refresh: bool = False) -> MarketDataset:
+        limit_up_pool = pd.DataFrame(
+            [
+                {
+                    "名称": "高价弱转强",
+                    "代码": "002333",
+                    "连板数": 2,
+                    "流通市值": 88.0,
+                    "换手率": 9.0,
+                    "封板资金": 2.36,
+                    "所属行业": "机器人",
+                    "首次封板时间": "142000",
+                    "最后封板时间": "145600",
+                    "炸板次数": 1,
+                    "最新价": 45.3,
+                    "涨跌幅": 10.01,
+                }
+            ]
+        )
+        board_snapshot = pd.DataFrame([{"板块名称": "机器人", "涨跌幅": 2.2}])
+        return MarketDataset(
+            trade_date="2026-04-15",
+            source="live",
+            limit_up_pool=limit_up_pool,
+            previous_limit_up_pool=pd.DataFrame(),
+            board_snapshot=board_snapshot,
+        )
+
+
+def test_weak_to_strong_filters_price_outside_2_to_40() -> None:
+    service = ScreenerService(data_service=WeakToStrongPriceOutOfRangeDataService())
+    response = service.screen_weak_to_strong("20260415", use_demo_on_failure=False)
+    assert response.items == []
+
+
+class MarketSignalNoCloseDataService:
+    def get_market_dataset(self, trade_date: str | None = None, force_refresh: bool = False) -> MarketDataset:
+        return MarketDataset(
+            trade_date="2026-04-21",
+            source="cache",
+            limit_up_pool=pd.DataFrame(),
+            previous_limit_up_pool=pd.DataFrame(),
+            board_snapshot=pd.DataFrame(),
+        )
+
+    def get_limit_down_pool(self, trade_date: str | None = None, force_refresh: bool = False) -> pd.DataFrame:
+        return pd.DataFrame()
+
+    def get_market_overview(
+        self,
+        trade_date: str | None = None,
+        force_refresh: bool = False,
+    ) -> MarketOverviewSnapshot:
+        return MarketOverviewSnapshot(
+            market_overview="当日尚未收盘，暂无可用指数收盘数据。",
+            turnover_overview="当日尚未收盘，暂无可用沪深京成交额收盘数据。",
+            notes=["交易日未收盘，已停止使用昨日缓存/历史数据回填。"],
+            has_valid_close=False,
+        )
+
+
+def test_market_signal_future_date_returns_no_backfill_message() -> None:
+    service = ScreenerService(data_service=MarketSignalNoCloseDataService())
+    response = service.build_market_signal("2099-01-01", use_demo_on_failure=True)
+    assert response.trade_date == "2099-01-01"
+    assert response.indicators == []
+    assert "尚未到达" in response.marketOverview
+    assert any("不返回历史缓存回填" in note for note in response.notes)
+
+
+def test_market_signal_no_close_returns_empty_indicators() -> None:
+    service = ScreenerService(data_service=MarketSignalNoCloseDataService())
+    response = service.build_market_signal("2026-04-21", use_demo_on_failure=True)
+    assert response.indicators == []
+    assert "暂无可用指数收盘数据" in response.marketOverview
+    assert "暂无可用沪深京成交额收盘数据" in response.turnoverOverview
+
+
+def test_extract_index_snapshot_requires_exact_trade_date() -> None:
+    index_frame = pd.DataFrame(
+        [
+            {"date": datetime(2026, 4, 17), "close": 3200.0, "amount": 400_000_000_000},
+            {"date": datetime(2026, 4, 18), "close": 3250.0, "amount": 420_000_000_000},
+        ]
+    )
+    # Asking for 2026-04-19 must not fallback to 2026-04-18.
+    snapshot = AkshareDataService._extract_index_snapshot(index_frame, "2026-04-19", "沪指")
+    assert snapshot is None

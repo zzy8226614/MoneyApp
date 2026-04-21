@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from .routes.debug import router as debug_router
 from .routes.screening import router as screening_router
 from .routes.v1_screening import router as screening_v1_router
 
@@ -31,6 +32,7 @@ def health() -> dict[str, str]:
 
 app.include_router(screening_router)
 app.include_router(screening_v1_router)
+app.include_router(debug_router)
 
 desktop_shell_dir = Path(__file__).resolve().parents[2] / "web" / "desktop-shell"
 if desktop_shell_dir.exists():
