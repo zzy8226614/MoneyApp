@@ -27,6 +27,9 @@ interface ScreeningApi {
     @POST("screen/top5")
     suspend fun screenTop5(@Body request: ScreeningRequest): ScreeningResponse
 
+    @POST("screen/board-top10-limit-up")
+    suspend fun screenBoardTop10LimitUp(@Body request: ScreeningRequest): ScreeningResponse
+
     companion object {
         @OptIn(ExperimentalSerializationApi::class)
         fun create(baseUrl: String): ScreeningApi {

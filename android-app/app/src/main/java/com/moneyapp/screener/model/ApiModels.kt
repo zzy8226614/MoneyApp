@@ -28,6 +28,7 @@ data class ScreeningItem(
     val boardName: String,
     val boardRank: Int = 0,
     val boardLimitUpCount: Int,
+    val ladderLevel: String = "--",
     val turnoverRate: String,
     val sealTime: String,
     val sealOrderLots: String = "--",
@@ -74,4 +75,5 @@ enum class ScreenDestination {
     FIRST_BOARD,
     WEAK_TO_STRONG,
     TOP5,
+    BOARD_TOP10_LIMIT_UP,
 }

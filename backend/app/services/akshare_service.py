@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, as_completed
 from zoneinfo import ZoneInfo
 
 import akshare as ak
@@ -120,6 +120,7 @@ class AkshareDataService:
         self,
         trade_date: str | None = None,
         force_refresh: bool = False,
+        include_board_snapshot: bool = True,
     ) -> MarketDataset:
         compact_date, pretty_date = _normalize_trade_date(trade_date)
         limit_up_pool, limit_up_source = self._run_with_cache(
@@ -132,13 +133,16 @@ class AkshareDataService:
             lambda: ak.stock_zt_pool_previous_em(date=compact_date),
             force_refresh=force_refresh,
         )
-        try:
-            board_snapshot, board_source = self._run_with_cache(
-                f"industry_board_snapshot_{compact_date}",
-                lambda: ak.stock_board_industry_name_em(),
-                force_refresh=force_refresh,
-            )
-        except Exception:  # pragma: no cover - network dependent
+        if include_board_snapshot:
+            try:
+                board_snapshot, board_source = self._run_with_cache(
+                    f"industry_board_snapshot_{compact_date}",
+                    lambda: ak.stock_board_industry_name_em(),
+                    force_refresh=force_refresh,
+                )
+            except Exception:  # pragma: no cover - network dependent
+                board_snapshot, board_source = pd.DataFrame(), "empty"
+        else:
             board_snapshot, board_source = pd.DataFrame(), "empty"
 
         source = ",".join(
@@ -213,30 +217,31 @@ class AkshareDataService:
             ("深成指", "sz399001"),
             ("创业板指", "sz399006"),
         )
-        # Tencent index daily endpoint can be slow/unstable; use longer timeout and one retry per index.
-        index_timeout = max(self.fetch_timeout_seconds, 45.0)
-        for display_name, symbol in index_defs:
-            index_frame: pd.DataFrame | None = None
-            source = "empty"
-            for _ in range(2):
+        # Keep close-to-realtime requests responsive after close by capping per-source waits.
+        index_timeout = max(self.fetch_timeout_seconds, 12.0)
+        with ThreadPoolExecutor(max_workers=len(index_defs)) as executor:
+            future_map = {
+                executor.submit(
+                    self._run_with_cache,
+                    f"index_daily_tx_{symbol}_{compact_date}",
+                    (lambda symbol=symbol: ak.stock_zh_index_daily_tx(symbol=symbol)),
+                    force_refresh,
+                    True,
+                    index_timeout,
+                ): (display_name, symbol)
+                for display_name, symbol in index_defs
+            }
+            for future in as_completed(future_map):
+                display_name, _ = future_map[future]
                 try:
-                    index_frame, source = self._run_with_cache(
-                        f"index_daily_tx_{symbol}_{compact_date}",
-                        (lambda symbol=symbol: ak.stock_zh_index_daily_tx(symbol=symbol)),
-                        force_refresh=force_refresh,
-                        timeout_seconds=index_timeout,
-                    )
-                    break
+                    index_frame, source = future.result()
                 except Exception:  # pragma: no cover - network dependent
-                    index_frame = None
                     continue
-            if index_frame is None:
-                continue
-            if source == "cache":
-                cached_indexes.append(display_name)
-            snapshot = self._extract_index_snapshot(index_frame, pretty_date, display_name)
-            if snapshot is not None:
-                snapshots.append(snapshot)
+                if source == "cache":
+                    cached_indexes.append(display_name)
+                snapshot = self._extract_index_snapshot(index_frame, pretty_date, display_name)
+                if snapshot is not None:
+                    snapshots.append(snapshot)
 
         if cached_indexes:
             notes.append(f"部分指数行情来自本地缓存：{'、'.join(cached_indexes)}。")
@@ -301,15 +306,15 @@ class AkshareDataService:
     def _format_total_turnover_overview(self, trade_date: str, force_refresh: bool = False) -> str:
         compact_date = trade_date.replace("-", "")
         spot_frame = pd.DataFrame()
-        # Full-market spot endpoint is unstable in some networks; retry a few
-        # times before declaring unavailable.
-        for _ in range(3):
+        # Avoid long tail latency in degraded windows; fallback to legu quickly.
+        attempts = 1 if force_refresh else 2
+        for _ in range(attempts):
             try:
                 spot_frame, _ = self._run_with_cache(
                     f"a_spot_total_turnover_{compact_date}",
                     lambda: ak.stock_zh_a_spot_em(),
                     force_refresh=force_refresh,
-                    timeout_seconds=max(self.fetch_timeout_seconds, 25.0),
+                    timeout_seconds=max(self.fetch_timeout_seconds, 8.0),
                 )
                 if not spot_frame.empty:
                     break
@@ -332,7 +337,7 @@ class AkshareDataService:
                 f"market_activity_legu_{compact_date}",
                 lambda: ak.stock_market_activity_legu(),
                 force_refresh=force_refresh,
-                timeout_seconds=max(self.fetch_timeout_seconds, 15.0),
+                timeout_seconds=max(self.fetch_timeout_seconds, 6.0),
             )
         except Exception:
             return 0.0

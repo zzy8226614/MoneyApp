@@ -45,6 +45,18 @@ def screen_top5(request: ScreeningRequest) -> ScreeningResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.post("/board-top10-limit-up", response_model=ScreeningResponse)
+def screen_board_top10_limit_up(request: ScreeningRequest) -> ScreeningResponse:
+    try:
+        return service.screen_board_top10_limit_up(
+            trade_date=request.trade_date,
+            use_demo_on_failure=request.use_demo_on_failure,
+            force_refresh=request.force_refresh,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.post("/market-signal", response_model=MarketSignalResponse)
 def market_signal(request: ScreeningRequest) -> MarketSignalResponse:
     try:

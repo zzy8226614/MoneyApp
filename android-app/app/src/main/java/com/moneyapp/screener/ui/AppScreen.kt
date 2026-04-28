@@ -49,6 +49,7 @@ fun MoneyAppRoot(viewModel: ScreeningViewModel = viewModel()) {
             onFirstBoardClick = viewModel::loadFirstBoard,
             onWeakToStrongClick = viewModel::loadWeakToStrong,
             onTop5Click = viewModel::loadTop5,
+            onBoardTop10LimitUpClick = viewModel::loadBoardTop10LimitUp,
         )
 
         ScreenDestination.MARKET_SIGNAL -> MarketSignalPage(
@@ -88,6 +89,16 @@ fun MoneyAppRoot(viewModel: ScreeningViewModel = viewModel()) {
             onRefresh = viewModel::refreshTop5,
             cardContent = { Top5ItemCard(it) },
         )
+
+        ScreenDestination.BOARD_TOP10_LIMIT_UP -> ScreeningResultPage(
+            title = "板块个股排名",
+            response = state.boardTop10LimitUpResponse,
+            isLoading = state.isLoading,
+            errorMessage = state.errorMessage,
+            onBack = viewModel::backToHome,
+            onRefresh = viewModel::refreshBoardTop10LimitUp,
+            cardContent = { FirstBoardItemCard(it) },
+        )
     }
 }
 
@@ -101,6 +112,7 @@ private fun HomePage(
     onFirstBoardClick: () -> Unit,
     onWeakToStrongClick: () -> Unit,
     onTop5Click: () -> Unit,
+    onBoardTop10LimitUpClick: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -162,6 +174,13 @@ private fun HomePage(
                 enabled = !state.isLoading,
             ) {
                 Text("Top5 推荐")
+            }
+            Button(
+                onClick = onBoardTop10LimitUpClick,
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !state.isLoading,
+            ) {
+                Text("板块个股排名")
             }
 
             if (state.isLoading) {
@@ -361,6 +380,7 @@ private fun FirstBoardItemCard(item: ScreeningItem) {
                 listOf(
                     "流通市值" to item.floatMarketCap,
                     "所属板块" to item.boardName,
+                    "连板天梯" to item.ladderLevel,
                     "板块排名" to formatBoardRank(item.boardRank),
                     "总分" to (item.totalScore?.let { "%.1f".format(it) } ?: "--"),
                 ),
@@ -395,6 +415,7 @@ private fun WeakToStrongItemCard(item: ScreeningItem) {
                 listOf(
                     "流通市值" to item.floatMarketCap,
                     "所属板块" to item.boardName,
+                    "连板天梯" to item.ladderLevel,
                     "板块排名" to formatBoardRank(item.boardRank),
                     "是否涨停" to if (item.isLimitUp) "是" else "否",
                 ),
@@ -427,6 +448,7 @@ private fun Top5ItemCard(item: ScreeningItem) {
                 listOf(
                     "流通市值" to item.floatMarketCap,
                     "所属板块" to item.boardName,
+                    "连板天梯" to item.ladderLevel,
                     "板块排名" to formatBoardRank(item.boardRank),
                     "策略" to strategyLabel(item.strategyTag),
                 ),
@@ -545,7 +567,11 @@ private fun CenterText(message: String) {
 }
 
 private fun strategyLabel(strategyTag: String): String {
-    return if (strategyTag == "first_board_to_second") "一进二" else "弱转强"
+    return when (strategyTag) {
+        "first_board_to_second" -> "一进二"
+        "board_top10_limit_up" -> "板块前10涨停"
+        else -> "弱转强"
+    }
 }
 
 private fun formatBoardRank(rank: Int): String {

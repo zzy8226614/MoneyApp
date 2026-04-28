@@ -14,6 +14,7 @@
 | `v1.7` | `2026-04-21` | 修正情绪信号取数口径：指数仅接受“请求交易日精确命中”的收盘数据；成交额统一为“沪深京总成交额”；新增“未来日期/当日未收盘不回填昨日缓存”约束，并补充 API 回归测试要求 |
 | `v1.8` | `2026-04-21` | 扩展交易日保护到全部筛选接口：`first-board`、`weak-to-strong`、`top5` 在未来日期/当日未收盘场景下统一快速返回空结果与提示，禁止任何历史缓存回填；新增 `/debug/upstream-check` 上游连通性诊断接口 |
 | `v1.9` | `2026-04-21` | 新增硬性价格过滤：`一进二` 与 `弱转强` 候选统一要求 `2元 <= 最新价 <= 40元`，不满足直接淘汰；同步更新接口与文档说明 |
+| `v2.0` | `2026-04-28` | 新增 `板块个股排名`（板块前10全量涨停穷举）与 `连板天梯` 字段；修正情绪信号 `/api/v1` 降级元数据语义（`degraded/source/cacheHit`）；优化情绪信号强刷链路超时与并发策略，降低失败场景等待时长；补充压力测试结果记录要求 |
 
 ## 1. 现系统拆解与问题诊断
 
@@ -453,7 +454,7 @@
 
 为提升多客户端联调速度，`/api/v1` 增加按交易日缓存的服务端响应缓存层：
 
-1. 覆盖接口：`market-signal`、`first-board`、`weak-to-strong`、`top5`。
+1. 覆盖接口：`market-signal`、`first-board`、`weak-to-strong`、`top5`、`board-top10-limit-up`。
 2. 缓存键至少包含 `screen_type + trade_date`。
 3. 默认请求（`force_refresh=false`）优先命中服务端响应缓存，作为“极速模式”返回。
 4. 强制刷新（`force_refresh=true`）必须绕过服务端响应缓存，优先拉取实时数据。
@@ -889,13 +890,13 @@
 1. 先保证 `信息完整与可追溯`，再考虑图表化。
 2. 卖点预警、风险降档、违规提醒必须高于普通行情提示。
 3. 每个候选标的必须能一键展开其 `评分明细 + 触发日志 + 放弃原因`。
-4. 首页按钮顺序固定为：`情绪信号` -> `一进二选股` -> `弱转强选股` -> `Top5 推荐`。
+4. 首页按钮顺序固定为：`情绪信号` -> `一进二选股` -> `弱转强选股` -> `Top5 推荐` -> `板块个股排名`。
 5. `情绪信号` 按钮必须位于首页且位于 `一进二选股` 按钮之前，不得放在结果页内部。
 6. `Top5 推荐` 页面单票展示字段固定为：`股票名称 | 流通市值 | 所属板块 | 板块排名 | 策略 | 入选理由`。
 7. `情绪信号页` 的单指标“是否达标”展示不再使用 `达标/未达标/触发` 文案，而统一输出 `绿灯/黄灯/红灯` 三种状态。
 8. `一进二选股`、`弱转强选股`、`Top5 推荐` 三类结果卡片需采用紧凑式手机布局，默认字号与边距以“一屏尽量多看候选”为优先。
 9. App 若某按钮对应的数据在本机已成功获取，且距当前时间不超过 `2` 小时，则再次点击同一按钮时应优先直接展示本地缓存结果，不再向后端重复发起实时请求。
-10. 上述 `2` 小时缓存按功能按钮独立隔离，至少区分 `情绪信号`、`一进二选股`、`弱转强选股`、`Top5 推荐` 四类。
+10. 上述 `2` 小时缓存按功能按钮独立隔离，至少区分 `情绪信号`、`一进二选股`、`弱转强选股`、`Top5 推荐`、`板块个股排名` 五类。
 11. 仅当上次结果为“成功可展示”时才写入该缓存；失败结果、超时结果、空响应结果不得覆盖成功缓存。
 12. 当前实现中结果页单票展示字段规则统一为：`策略` 字段在所有模式均不展示；`是否涨停` 仅在 `弱转强` 展示；`弱转强` 不展示 `总分`。
 13. 首页 `交易日` 输入框默认自动填充当天日期（`yyyy-MM-dd`），用户仍可手动修改。
@@ -1263,6 +1264,7 @@
         "stockName",
         "floatMarketCap",
         "boardName",
+        "ladderLevel",
         "boardRank",
         "totalScore",
         "sealTime",
@@ -1280,6 +1282,7 @@
         "stockName",
         "floatMarketCap",
         "boardName",
+        "ladderLevel",
         "boardRank",
         "isLimitUp",
         "openBoardCount",
@@ -1295,7 +1298,27 @@
         "stockName",
         "floatMarketCap",
         "boardName",
+        "ladderLevel",
         "boardRank",
+        "recommendReason"
+      ]
+    },
+    {
+      "path": "/screen/board-top10-limit-up",
+      "method": "POST",
+      "cache_policy": "client_side_success_cache_2h",
+      "response_fields": [
+        "stockName",
+        "floatMarketCap",
+        "boardName",
+        "ladderLevel",
+        "boardRank",
+        "totalScore",
+        "sealTime",
+        "sealOrderLots",
+        "openBoardCount",
+        "turnoverRate",
+        "boardLimitUpCount",
         "recommendReason"
       ]
     }
@@ -1307,7 +1330,7 @@
 
 为同时兼容 Android 现版客户端与未来 Windows 10 MFC + WebView2 客户端，接口层新增以下约束：
 
-1. 旧路径 `GET /health`、`POST /screen/market-signal`、`POST /screen/first-board`、`POST /screen/weak-to-strong`、`POST /screen/top5` 视为 `legacy contract`，在 Android 完成迁移前不得做破坏性变更。
+1. 旧路径 `GET /health`、`POST /screen/market-signal`、`POST /screen/first-board`、`POST /screen/weak-to-strong`、`POST /screen/top5`、`POST /screen/board-top10-limit-up` 视为 `legacy contract`，在 Android 完成迁移前不得做破坏性变更。
 2. 新客户端统一接入 `/api/v1/*`，例如 `/api/v1/health`、`/api/v1/screen/first-board`。
 3. `/api/v1/*` 统一返回 envelope：
 
@@ -1331,6 +1354,7 @@
 5. 新客户端建议通过请求头 `X-Client-Type` 传递来源，允许值至少包括 `android`、`windows-mfc`、`web-desktop`。
 6. 若未来需要调整 `data` 结构中的字段命名或语义，必须升级到 `/api/v2/*`，不得在 `/api/v1/*` 内静默破坏兼容性。
 7. 仓库目录边界固定为：`backend/`、`android-app/`、`windows-mfc/`、`web/desktop-shell/`、`docs/`，新桌面端代码不得混入 `android-app/`。
+8. `market-signal` 的 `meta.degraded` 必须反映真实降级状态：当指数或成交额任一主口径不可用并触发降级文案时，`degraded=true`；`meta.source` 需按 `live/cache/demo/mixed` 给出可解释来源，不得长期固定为 `unknown`。
 
 #### 6.4.2 `StrategyEngine.generate_candidates`
 

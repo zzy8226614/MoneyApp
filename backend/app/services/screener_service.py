@@ -201,6 +201,95 @@ class ScreenerService:
             error=None,
         )
 
+    def screen_board_top10_limit_up(
+        self,
+        trade_date: str | None,
+        use_demo_on_failure: bool,
+        force_refresh: bool = False,
+    ) -> ScreeningResponse:
+        guard_response = self._screening_trade_date_guard(trade_date)
+        if guard_response is not None:
+            return guard_response
+        try:
+            dataset = self.data_service.get_market_dataset(trade_date, force_refresh=force_refresh)
+        except Exception as exc:
+            if use_demo_on_failure:
+                return self._empty_screening_response(
+                    self._normalize_date(trade_date),
+                    "板块个股排名数据暂不可用。",
+                    "演示模式下该策略不回填模拟标的。",
+                )
+            raise RuntimeError(f"Failed to screen board top10 limit-up pool: {exc}") from exc
+
+        if dataset.limit_up_pool.empty:
+            return ScreeningResponse(
+                trade_date=dataset.trade_date,
+                market_summary=self._market_summary(dataset, 0, 0),
+                items=[],
+                error=None,
+            )
+
+        context = self._build_candidate_context(dataset)
+        frame = dataset.limit_up_pool.copy()
+        items: list[ScreeningItem] = []
+        for _, row in frame.iterrows():
+            board_name = self._board_name(row)
+            board_rank = context.board_ranks.get(board_name, 0)
+            if board_rank <= 0 or board_rank > 10:
+                continue
+            name = str(row.get("名称", "")).strip()
+            symbol = str(row.get("代码", "")).strip()
+            if not name or not symbol:
+                continue
+            turnover = self._to_float(row.get("换手率"))
+            latest_price = self._to_float(row.get("最新价"))
+            seal_funds = self._to_float(row.get("封板资金"))
+            board_count = context.board_counts.get(board_name, 0)
+            seal_time = self._format_time(row.get("首次封板时间"))
+            open_board_count = int(self._to_float(row.get("炸板次数")))
+            float_market_cap_yi = self._to_yi(row.get("流通市值"))
+            seal_order_lots = self._format_seal_order_lots(seal_funds, latest_price)
+            # Keep the displayed "总分" aligned with 一进二评分卡（满分 27 分）。
+            score = round(
+                self._score_first_limit_time(seal_time)
+                + self._score_turnover(turnover)
+                + self._score_seal_amount(self._to_yi(seal_funds))
+                + self._score_board_synergy(board_count),
+                2,
+            )
+            reason = f"所属板块“{board_name}”位列当日涨停板块第 {board_rank} 名，板块内涨停 {board_count} 家。"
+            items.append(
+                ScreeningItem(
+                    stockName=name,
+                    symbol=symbol,
+                    floatMarketCap=f"{float_market_cap_yi:.2f}亿" if float_market_cap_yi > 0 else "--",
+                    boardName=board_name,
+                    boardRank=board_rank,
+                    boardLimitUpCount=board_count,
+                    ladderLevel=self._ladder_level_label(self._to_float(row.get("连板数"))),
+                    turnoverRate=f"{turnover:.2f}%",
+                    sealTime=seal_time,
+                    sealOrderLots=seal_order_lots,
+                    openBoardCount=open_board_count,
+                    totalScore=score,
+                    isLimitUp=True,
+                    strategyTag="board_top10_limit_up",
+                    recommendReason=reason,
+                )
+            )
+
+        sorted_items = sorted(
+            items,
+            key=lambda item: (item.boardRank <= 0, item.boardRank, -(item.totalScore or 0.0), item.symbol),
+        )
+        notes = [f"已穷举板块排名前10的全部涨停个股，共 {len(sorted_items)} 只。"]
+        return ScreeningResponse(
+            trade_date=dataset.trade_date,
+            market_summary=self._market_summary(dataset, 0, 0, extra_notes=notes),
+            items=sorted_items,
+            error=None,
+        )
+
     def build_market_signal(
         self,
         trade_date: str | None,
@@ -226,7 +315,7 @@ class ScreenerService:
             # Core signal data paths run in parallel to avoid serial blocking on force refresh.
             with ThreadPoolExecutor(max_workers=2) as executor:
                 dataset_future = executor.submit(
-                    self.data_service.get_market_dataset,
+                    self._get_market_dataset_for_signal,
                     trade_date,
                     force_refresh,
                 )
@@ -330,6 +419,24 @@ class ScreenerService:
                     error=None,
                 )
             raise RuntimeError(f"Failed to build market signal: {exc}") from exc
+
+    def _get_market_dataset_for_signal(
+        self,
+        trade_date: str | None,
+        force_refresh: bool,
+    ) -> MarketDataset:
+        try:
+            return self.data_service.get_market_dataset(
+                trade_date=trade_date,
+                force_refresh=force_refresh,
+                include_board_snapshot=False,
+            )
+        except TypeError:
+            # Backward-compat for tests or alternative data service stubs.
+            return self.data_service.get_market_dataset(
+                trade_date=trade_date,
+                force_refresh=force_refresh,
+            )
 
     def _build_first_board_items(
         self,
@@ -453,6 +560,7 @@ class ScreenerService:
                 boardName=board_name,
                 boardRank=board_rank,
                 boardLimitUpCount=board_count,
+                ladderLevel=self._ladder_level_label(self._to_float(row.get("连板数"))),
                 turnoverRate=f"{turnover:.2f}%",
                 sealTime=seal_time,
                 sealOrderLots=seal_order_lots,
@@ -559,6 +667,7 @@ class ScreenerService:
             boardName=board_name,
             boardRank=board_rank,
             boardLimitUpCount=board_count,
+            ladderLevel=self._ladder_level_label(board_count_value),
             turnoverRate=f"{turnover:.2f}%",
             sealTime=last_time,
             sealOrderLots=self._format_seal_order_lots(seal_funds, latest_price),
@@ -900,3 +1009,12 @@ class ScreenerService:
             6: "星期日",
         }
         return weekday_map[datetime.strptime(trade_date, "%Y-%m-%d").weekday()]
+
+    @staticmethod
+    def _ladder_level_label(board_count: float | int) -> str:
+        value = int(board_count) if board_count else 0
+        if value <= 0:
+            return "--"
+        if value == 1:
+            return "首板"
+        return f"{value}板"

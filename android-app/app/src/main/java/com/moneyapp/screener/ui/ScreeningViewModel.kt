@@ -26,6 +26,7 @@ data class UiState(
     val firstBoardResponse: ScreeningResponse? = null,
     val weakToStrongResponse: ScreeningResponse? = null,
     val top5Response: ScreeningResponse? = null,
+    val boardTop10LimitUpResponse: ScreeningResponse? = null,
 )
 
 private fun defaultTradeDate(): String =
@@ -137,6 +138,34 @@ class ScreeningViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             },
             onSuccess = { state, response -> state.copy(top5Response = response) },
+        )
+    }
+
+    fun loadBoardTop10LimitUp() {
+        load(
+            destination = ScreenDestination.BOARD_TOP10_LIMIT_UP,
+            block = { state ->
+                repository.loadBoardTop10LimitUp(
+                    baseUrl = state.baseUrl.trim(),
+                    tradeDate = state.tradeDate.trim(),
+                    forceRefresh = false,
+                )
+            },
+            onSuccess = { state, response -> state.copy(boardTop10LimitUpResponse = response) },
+        )
+    }
+
+    fun refreshBoardTop10LimitUp() {
+        load(
+            destination = ScreenDestination.BOARD_TOP10_LIMIT_UP,
+            block = { state ->
+                repository.loadBoardTop10LimitUp(
+                    baseUrl = state.baseUrl.trim(),
+                    tradeDate = state.tradeDate.trim(),
+                    forceRefresh = true,
+                )
+            },
+            onSuccess = { state, response -> state.copy(boardTop10LimitUpResponse = response) },
         )
     }
 

@@ -27,13 +27,14 @@ class ScreeningItem(BaseModel):
     boardName: str
     boardRank: int = 0
     boardLimitUpCount: int
+    ladderLevel: str = "--"
     turnoverRate: str
     sealTime: str
     sealOrderLots: str = "--"
     openBoardCount: int = 0
     totalScore: float | None = None
     isLimitUp: bool = True
-    strategyTag: Literal["first_board_to_second", "weak_to_strong_2nd"]
+    strategyTag: Literal["first_board_to_second", "weak_to_strong_2nd", "board_top10_limit_up"]
     recommendReason: str
 
 

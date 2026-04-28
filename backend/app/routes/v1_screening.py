@@ -69,16 +69,27 @@ def _normalized_trade_date_key(trade_date: str | None) -> str:
 
 def _market_signal_meta(response: MarketSignalResponse, context: ClientContext) -> ApiV1Meta:
     notes_blob = " ".join(response.notes).lower()
-    source = "unknown"
-    if "fallback" in notes_blob or "demo" in notes_blob:
-        source = "demo"
-    elif "缓存" in notes_blob or "cache" in notes_blob:
+    has_cache_hint = ("缓存" in notes_blob) or ("cache" in notes_blob)
+    has_demo_hint = ("fallback" in notes_blob) or ("demo" in notes_blob)
+    has_degraded_hint = any(
+        token in notes_blob
+        for token in ("不可用", "失败", "降级", "仅基于", "暂不可用")
+    ) or ("暂不可用" in response.marketOverview) or ("暂不可用" in response.turnoverOverview)
+
+    if has_cache_hint and has_degraded_hint:
+        source: ResponseSource = "mixed"
+    elif has_cache_hint:
         source = "cache"
+    elif has_demo_hint:
+        source = "demo"
+    else:
+        source = "live" if not has_degraded_hint else "unknown"
+
     return ApiV1Meta(
         requestId=context.request_id,
         clientType=context.client_type,
         cacheHit=source in {"cache", "mixed"},
-        degraded=source in {"cache", "demo", "mixed"},
+        degraded=has_degraded_hint or source in {"demo", "mixed"},
         source=source,
         upstreamSource=None,
     )
@@ -239,6 +250,32 @@ def screen_top5_v1(
         cache_key_prefix="resp_top5",
         response_factory=lambda data, meta: ApiV1ScreeningEnvelope(data=data, meta=meta),
         block=lambda: service.screen_top5(
+            trade_date=payload.trade_date,
+            use_demo_on_failure=payload.use_demo_on_failure,
+            force_refresh=payload.force_refresh,
+        ),
+    )
+
+
+@router.post(
+    "/screen/board-top10-limit-up",
+    response_model=ApiV1ScreeningEnvelope,
+    responses={500: {"model": ApiV1ErrorEnvelope}},
+)
+def screen_board_top10_limit_up_v1(
+    payload: ApiV1Request,
+    request: Request,
+    response: Response,
+    x_client_type: str | None = Header(default=None),
+) -> ApiV1ScreeningEnvelope | JSONResponse:
+    context = _request_context(request, x_client_type)
+    response.headers["X-Request-Id"] = context.request_id
+    return _execute_screening(
+        request=payload,
+        client_context=context,
+        cache_key_prefix="resp_board_top10_limit_up",
+        response_factory=lambda data, meta: ApiV1ScreeningEnvelope(data=data, meta=meta),
+        block=lambda: service.screen_board_top10_limit_up(
             trade_date=payload.trade_date,
             use_demo_on_failure=payload.use_demo_on_failure,
             force_refresh=payload.force_refresh,

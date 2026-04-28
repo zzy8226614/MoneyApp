@@ -67,20 +67,29 @@
   - 指标表：`涨停家数 / 最高连板 / 连板晋级率 / 跌停潮`
 - “是否达标”统一只显示：`红灯 / 黄灯 / 绿灯`
 
+### 5. 板块个股排名
+
+- 按按钮触发后调用后端 `POST /screen/board-top10-limit-up`
+- 穷举“板块排名前10”的全部涨停个股
+- 展示结构与“一进二选股”一致，便于并排比较
+- 结果字段新增 `连板天梯`（示例：`首板`、`2板`、`3板`）
+
 ## 当前实现说明
 
 - 后端优先尝试实时调用 `Akshare`
 - 若本地网络或上游接口异常，则会优先使用本地缓存
 - 若缓存也不存在，则会回退到内置 demo 数据，保证 APK 可以完整走通交互链路
-- `api/v1` 路由新增服务端响应缓存（按交易日缓存 market-signal / first-board / weak-to-strong / top5）
+- `api/v1` 路由新增服务端响应缓存（按交易日缓存 market-signal / first-board / weak-to-strong / top5 / board-top10-limit-up）
 - 同一交易日非强刷请求可直接命中服务端缓存，进入“极速模式”（毫秒到秒级返回）
 - `force_refresh=true` 时会绕过服务端响应缓存，优先拉取实时数据
+- `market-signal` 在指数/成交额降级场景下会正确标记 `meta.degraded=true`，并给出可解释的 `meta.source`
+- `market-signal` 强刷链路已做超时与并发优化，失败场景等待时长由“分钟级”缩短至“约 20-30 秒级”
 
 这意味着：
 
 - 在网络通畅时，你看到的是实时筛选结果
 - 在网络不通或 `Akshare` 波动时，你仍然能看到完整软件效果，不会出现空白页或闪退
-- App 端对 `情绪信号`、`一进二选股`、`弱转强选股`、`Top5 推荐` 启用 `2` 小时成功结果缓存
+- App 端对 `情绪信号`、`一进二选股`、`弱转强选股`、`Top5 推荐`、`板块个股排名` 启用 `2` 小时成功结果缓存
 - 同一按钮在 `2` 小时内再次点击会优先直接展示缓存；结果页点击 `刷新` 才会强制重新请求后端
 
 ## 后端运行
@@ -135,6 +144,8 @@
 - 旧版只要求服务可启动；新版建议首次部署后执行一次**接口预热**，把当日响应缓存准备好，避免首个用户请求等待较长时间。
 - 旧版桌面端依赖 `http://IP:8000/desktop-shell/` 页面；新版桌面壳默认由本地 `file://` 加载，服务器侧重点改为 `api/v1` 接口可用性。
 - 强制刷新（`force_refresh=true`）在新版会绕过服务端响应缓存；日常联调建议默认请求，只有需要拉最新实时数据时再点“刷新”。
+- 新版 `market-signal` 在降级时会返回可解释元数据（`meta.degraded` 与 `meta.source`），建议部署后把它纳入巡检项。
+- 根据压测结论：`force_refresh=true` 的 `market-signal` 在上游波动时仍可能出现单次超时，建议生产默认走缓存模式，仅在人工强刷时使用。
 
 ### 服务器环境
 
@@ -212,7 +223,16 @@ curl -X POST http://127.0.0.1:8000/api/v1/screen/market-signal -H "Content-Type:
 curl -X POST http://127.0.0.1:8000/api/v1/screen/first-board   -H "Content-Type: application/json" -d '{"trade_date":null,"use_demo_on_failure":true,"force_refresh":false}'
 curl -X POST http://127.0.0.1:8000/api/v1/screen/weak-to-strong -H "Content-Type: application/json" -d '{"trade_date":null,"use_demo_on_failure":true,"force_refresh":false}'
 curl -X POST http://127.0.0.1:8000/api/v1/screen/top5          -H "Content-Type: application/json" -d '{"trade_date":null,"use_demo_on_failure":true,"force_refresh":false}'
+curl -X POST http://127.0.0.1:8000/api/v1/screen/board-top10-limit-up -H "Content-Type: application/json" -d '{"trade_date":null,"use_demo_on_failure":true,"force_refresh":false}'
 ```
+
+建议补充一次上游连通性巡检：
+
+```bash
+curl "http://127.0.0.1:8000/debug/upstream-check?timeout_seconds=12"
+```
+
+若 `index_*` 或 `spot_a_share_turnover` 探针频繁失败，请优先排查服务器到上游源站的网络连通性，而不是直接判定服务进程异常。
 
 ### 腾讯云安全组
 
@@ -237,6 +257,9 @@ Environment="PATH=/home/ubuntu/moneyapp-venv/bin"
 ExecStart=/home/ubuntu/moneyapp-venv/bin/python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGINT
+LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
@@ -324,7 +347,10 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 120s;
+        # market-signal 在 force_refresh + 上游抖动时可能较慢，避免代理层过早断开
+        proxy_connect_timeout 10s;
+        proxy_send_timeout 90s;
+        proxy_read_timeout 180s;
     }
 }
 ```
@@ -378,7 +404,17 @@ sudo systemctl status moneyapp
 sudo systemctl status nginx
 sudo journalctl -u moneyapp -n 100 --no-pager
 curl -sS https://api.example.com/api/v1/health
+curl -sS "https://api.example.com/debug/upstream-check?timeout_seconds=12"
 ```
+
+若出现“服务偶发停掉”现象，优先执行：
+
+```bash
+sudo journalctl -u moneyapp --since "2 hours ago" --no-pager
+dmesg -T | grep -i -E "killed process|out of memory|oom"
+```
+
+如果日志出现 OOM 关键字，说明是系统资源层面终止进程，需要优先扩容或限制并发强刷流量。
 
 #### 7) 客户端地址建议
 
@@ -391,7 +427,7 @@ curl -sS https://api.example.com/api/v1/health
 
 - 首页后端地址改成：`http://公网IP:8000/`（默认值可改为你自己的服务器地址，例如 `http://183.62.173.178:8000/`）
 - 先点 `情绪信号`
-- 再点 `一进二选股`、`弱转强选股`、`Top5 推荐`
+- 再点 `一进二选股`、`弱转强选股`、`Top5 推荐`、`板块个股排名`
 - 若页面显示旧结果，优先在结果页点击 `刷新`，避免命中 `2` 小时客户端缓存
 
 ## Android APK 运行
@@ -412,6 +448,7 @@ curl -sS https://api.example.com/api/v1/health
   - `一进二选股`
   - `弱转强选股`
   - `Top5 推荐`
+  - `板块个股排名`
 - 结果页：
   - 支持返回
   - 支持刷新
@@ -430,6 +467,7 @@ curl -sS https://api.example.com/api/v1/health
 
 - 调试包：`android-app/app/build/outputs/apk/debug/app-debug.apk`
 - 可安装发布包：`android-app/app/build/outputs/apk/release/app-release.apk`
+- 最新 `release` 构建时间：`2026-04-28 16:14`（本轮已重新打包）
 
 `app-release.apk` 当前已使用独立发布证书签名，不再复用 `Android Debug` 证书，可作为当前机器上的正式侧载安装包继续迭代。
 
@@ -441,7 +479,7 @@ curl -sS https://api.example.com/api/v1/health
 4. 启动你电脑上的后端服务，并确保手机与电脑处于同一局域网。
 5. 打开 APP，在首页将后端地址改成电脑局域网 IP，例如 `http://192.168.1.10:8000/`。
 6. 先点击 `情绪信号` 验证指数与成交额返回。
-7. 再点击 `一进二选股`、`弱转强选股`、`Top5 推荐` 验证三条链路。
+7. 再点击 `一进二选股`、`弱转强选股`、`Top5 推荐`、`板块个股排名` 验证四条链路。
 8. 若要强制获取最新数据，请在结果页点击 `刷新`。
 
 ### 交易日说明
@@ -450,14 +488,14 @@ curl -sS https://api.example.com/api/v1/health
 - 也可手动输入：
   - `YYYY-MM-DD`
   - `YYYYMMDD`
-- 当 `trade_date` 为未来日期时，`情绪信号`、`一进二选股`、`弱转强选股`、`Top5 推荐` 都会直接返回“请求交易日尚未到达，暂无可用收盘数据”，不会回填历史缓存
-- 当 `trade_date` 为当天且未收盘时，上述四个功能都会直接返回“当日尚未收盘，暂无可用收盘数据”，不会展示昨日缓存结果
+- 当 `trade_date` 为未来日期时，`情绪信号`、`一进二选股`、`弱转强选股`、`Top5 推荐`、`板块个股排名` 都会直接返回“请求交易日尚未到达，暂无可用收盘数据”，不会回填历史缓存
+- 当 `trade_date` 为当天且未收盘时，上述五个功能都会直接返回“当日尚未收盘，暂无可用收盘数据”，不会展示昨日缓存结果
 
 ## 已验证内容
 
 - `FastAPI` 服务可正常启动
 - `/health` 可正常返回
-- `/screen/market-signal`、`/screen/first-board`、`/screen/weak-to-strong`、`/screen/top5` 路由已实现
+- `/screen/market-signal`、`/screen/first-board`、`/screen/weak-to-strong`、`/screen/top5`、`/screen/board-top10-limit-up` 路由已实现
 - `pytest` 最小接口测试已通过
 - `market-signal` 已验证“未来日期/当日未收盘不回填历史缓存”规则
 - `first-board` / `weak-to-strong` / `top5` 已验证“未来日期不回填历史缓存”规则
@@ -466,6 +504,22 @@ curl -sS https://api.example.com/api/v1/health
 - Android `compileDebugKotlin` 已通过
 - `apksigner verify --print-certs` 已通过，`release` 包签名主体不再是 `Android Debug`
 - 手机重新安装最新 APK 后，已验证情绪信号、一进二、弱转强、Top5 的联调链路恢复正常
+- 已验证 `板块个股排名` 展示与 `一进二` 同款紧凑布局，且支持 `连板天梯`
+- 已验证 `market-signal` 在降级场景下 `meta.degraded/source` 标记正确
+
+### 压力测试记录（2026-04-28）
+
+- 常规混合压测（`force_refresh=false`，并发 `12`，持续 `180s`）：
+  - 总请求：`33628`
+  - 成功率：`100%`（`200=33628`）
+  - 健康检查失败：`0`
+  - 延迟：`P50=55ms`、`P95=87ms`、`P99=138ms`
+- 强刷情绪信号压测（`market-signal + force_refresh=true`，并发 `6`，持续约 `160s`）：
+  - 总请求：`24`
+  - 成功：`6`
+  - 客户端超时：`18`（`40s` read timeout）
+  - 健康检查失败：`0`
+- 结论：服务进程在压测期间保持存活，当前主要瓶颈集中在 `market-signal force_refresh=true` 的上游链路耗时与超时。
 
 ## 当前限制
 
@@ -497,6 +551,12 @@ curl -sS https://api.example.com/api/v1/health
 windows-mfc\build-winforms\MoneyAppDesktop.exe
 ```
 
+绿色免安装包（本轮已重新打包）：
+
+```text
+windows-mfc\dist\MoneyAppDesktop-Portable.zip
+```
+
 运行前请先启动后端，并确认以下地址可访问：
 
 - `http://127.0.0.1:8000/health`
@@ -504,12 +564,13 @@ windows-mfc\build-winforms\MoneyAppDesktop.exe
 
 > 说明：新版桌面端壳页面默认从本地 `web/desktop-shell/index.html`（`file://`）加载，不再要求服务器必须暴露 `/desktop-shell/` 静态页面。
 
-桌面端目前已具备与 Android 对齐的四个入口：
+桌面端目前已具备与 Android 对齐的五个入口：
 
 - `情绪信号`
 - `一进二选股`
 - `弱转强选股`
 - `Top5 推荐`
+- `板块个股排名`
 
 并带有桌面增强能力：
 

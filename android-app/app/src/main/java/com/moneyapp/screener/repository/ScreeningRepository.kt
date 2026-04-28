@@ -111,6 +111,28 @@ class ScreeningRepository(
         )
     }
 
+    suspend fun loadBoardTop10LimitUp(
+        baseUrl: String,
+        tradeDate: String,
+        forceRefresh: Boolean = false,
+    ): LoadResult<ScreeningResponse> {
+        return load(
+            screenType = "board_top10_limit_up",
+            baseUrl = baseUrl,
+            tradeDate = tradeDate,
+            forceRefresh = forceRefresh,
+            request = {
+                api(baseUrl).screenBoardTop10LimitUp(
+                    ScreeningRequest(
+                        tradeDate = tradeDate.ifBlank { null },
+                        useDemoOnFailure = false,
+                        forceRefresh = forceRefresh,
+                    ),
+                )
+            },
+        )
+    }
+
     private fun api(baseUrl: String): ScreeningApi = ScreeningApi.create(baseUrl)
 
     private fun cacheKey(screenType: String, baseUrl: String, tradeDate: String): String {

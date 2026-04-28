@@ -52,6 +52,15 @@ def test_top5_demo_response() -> None:
     assert len(body["items"]) <= 5
 
 
+def test_board_top10_limit_up_demo_response() -> None:
+    response = client.post("/screen/board-top10-limit-up", json={"use_demo_on_failure": True})
+    body = response.json()
+    assert response.status_code == 200
+    assert "trade_date" in body
+    assert "market_summary" in body
+    assert "items" in body
+
+
 def test_market_signal_response() -> None:
     response = client.post("/screen/market-signal", json={"use_demo_on_failure": True})
     body = response.json()
@@ -87,6 +96,50 @@ def test_v1_market_signal_response() -> None:
     assert body["success"] is True
     assert body["meta"]["clientType"] == "android"
     assert "regime" in body["data"]
+
+
+def test_v1_market_signal_meta_marks_degraded_when_overview_unavailable(monkeypatch) -> None:
+    def fake_build_market_signal(
+        trade_date: str | None,
+        use_demo_on_failure: bool,
+        force_refresh: bool = False,
+    ) -> MarketSignalResponse:
+        return MarketSignalResponse(
+            trade_date=trade_date or "2026-04-28",
+            weekday="星期二",
+            marketOverview="指数行情暂不可用。",
+            turnoverOverview="成交额暂不可用。",
+            regime="YELLOW",
+            regimeLabel="黄灯",
+            positionAdvice="当日未收盘，建议仅观察，不执行收盘后策略。",
+            indicators=[],
+            notes=["指数行情暂不可用，已仅基于涨停/跌停/连板指标生成情绪信号。"],
+            error=None,
+        )
+
+    monkeypatch.setattr(v1_screening.service, "build_market_signal", fake_build_market_signal)
+    response = client.post(
+        "/api/v1/screen/market-signal",
+        json={"trade_date": "2026-04-28", "use_demo_on_failure": True, "force_refresh": True},
+        headers={"X-Client-Type": "web-desktop"},
+    )
+    body = response.json()
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert body["meta"]["degraded"] is True
+
+
+def test_v1_board_top10_limit_up_response() -> None:
+    response = client.post(
+        "/api/v1/screen/board-top10-limit-up",
+        json={"use_demo_on_failure": True},
+        headers={"X-Client-Type": "windows-mfc"},
+    )
+    body = response.json()
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert body["meta"]["clientType"] == "windows-mfc"
+    assert "items" in body["data"]
 
 
 def test_v1_market_signal_future_date_no_backfill() -> None:
@@ -306,6 +359,44 @@ def test_weak_to_strong_filters_price_outside_2_to_40() -> None:
     service = ScreenerService(data_service=WeakToStrongPriceOutOfRangeDataService())
     response = service.screen_weak_to_strong("20260415", use_demo_on_failure=False)
     assert response.items == []
+
+
+class BoardTop10ScoreCapDataService:
+    def get_market_dataset(self, trade_date: str | None = None, force_refresh: bool = False) -> MarketDataset:
+        limit_up_pool = pd.DataFrame(
+            [
+                {
+                    "名称": "板块前10样本",
+                    "代码": "002555",
+                    "连板数": 2,
+                    "流通市值": 120.0,
+                    "换手率": 12.8,
+                    "封板资金": 2.8,
+                    "所属行业": "机器人",
+                    "首次封板时间": "094201",
+                    "最后封板时间": "094300",
+                    "炸板次数": 0,
+                    "最新价": 18.3,
+                    "涨跌幅": 10.01,
+                }
+            ]
+        )
+        board_snapshot = pd.DataFrame([{"板块名称": "机器人", "涨跌幅": 3.2}])
+        return MarketDataset(
+            trade_date="2026-04-15",
+            source="live",
+            limit_up_pool=limit_up_pool,
+            previous_limit_up_pool=pd.DataFrame(),
+            board_snapshot=board_snapshot,
+        )
+
+
+def test_board_top10_limit_up_score_not_exceed_27() -> None:
+    service = ScreenerService(data_service=BoardTop10ScoreCapDataService())
+    response = service.screen_board_top10_limit_up("20260415", use_demo_on_failure=False)
+    assert len(response.items) == 1
+    assert response.items[0].totalScore is not None
+    assert response.items[0].totalScore <= 27
 
 
 class MarketSignalNoCloseDataService:

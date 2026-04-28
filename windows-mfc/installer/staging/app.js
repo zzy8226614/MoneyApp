@@ -26,8 +26,7 @@
     "market-signal": "情绪信号",
     "first-board": "一进二选股",
     "weak-to-strong": "弱转强选股",
-    "top5": "Top5 推荐",
-    "board-top10-limit-up": "板块个股排名"
+    "top5": "Top5 推荐"
   };
 
   var state = {
@@ -72,11 +71,6 @@
       return window.JSON.parse(text);
     }
     return eval("(" + text + ")");
-  }
-
-  function pad2(value) {
-    var text = String(value);
-    return text.length < 2 ? "0" + text : text;
   }
 
   function renderList(container, items) {
@@ -198,14 +192,13 @@
       '<section class="summary-card"><h3>备注</h3>' + renderNotes(data.notes) + '</section>';
   }
 
-  function renderScreening(data, screen) {
+  function renderScreening(data) {
     var summary = data.market_summary || {};
     var items = data.items || [];
     var html = '';
     var i;
     var item;
-    var showLimitUpMetric = screen === "weak-to-strong";
-    var showTotalScoreMetric = screen !== "weak-to-strong";
+    var extras;
     html += '<section class="summary-card"><h3>' + escapeHtml(summary.tradeDate || data.trade_date || "--") + '</h3>';
     html += '<div class="summary-grid">' +
       renderMetric("涨停总数", summary.limitUpCount == null ? "--" : String(summary.limitUpCount)) +
@@ -224,18 +217,19 @@
 
     for (i = 0; i < items.length; i += 1) {
       item = items[i];
+      extras = item.strategyTag ? renderMetric("策略", item.strategyTag) : "";
       html += '<article class="item-card"><h3>' + escapeHtml(item.stockName) + '</h3><div class="item-grid">' +
         renderMetric("流通市值", item.floatMarketCap || "--") +
         renderMetric("所属板块", item.boardName || "--") +
-        renderMetric("连板天梯", item.ladderLevel || "--") +
         renderMetric("板块排名", item.boardRank == null ? "--" : String(item.boardRank)) +
-        (showTotalScoreMetric ? renderMetric("总分", item.totalScore == null ? "--" : String(item.totalScore)) : "") +
+        renderMetric("总分", item.totalScore == null ? "--" : String(item.totalScore)) +
         renderMetric("封单时间", item.sealTime || "--") +
         renderMetric("封单手数", item.sealOrderLots || "--") +
         renderMetric("开板次数", item.openBoardCount == null ? "--" : String(item.openBoardCount)) +
         renderMetric("换手率", item.turnoverRate || "--") +
         renderMetric("板块涨停数", item.boardLimitUpCount == null ? "--" : String(item.boardLimitUpCount)) +
-        (showLimitUpMetric ? renderMetric("是否涨停", item.isLimitUp ? "是" : "否") : "") +
+        renderMetric("是否涨停", item.isLimitUp ? "是" : "否") +
+        extras +
         '</div><p>' + escapeHtml(item.recommendReason || "--") + '</p></article>';
     }
 
@@ -258,7 +252,7 @@
     if (screen === "market-signal") {
       renderMarketSignal(envelope.data);
     } else {
-      renderScreening(envelope.data, screen);
+      renderScreening(envelope.data);
     }
   }
 
@@ -327,7 +321,6 @@
   }
 
   function readStoredConfig() {
-    var today;
     try {
       var storedBaseUrl = window.localStorage.getItem("moneyapp.desktop.baseUrl");
       var storedTradeDate = window.localStorage.getItem("moneyapp.desktop.tradeDate");
@@ -338,18 +331,9 @@
       }
       if (storedTradeDate) {
         tradeDateInput.value = storedTradeDate;
-      } else {
-        today = new Date();
-        tradeDateInput.value = today.getFullYear() + "-" +
-          pad2(today.getMonth() + 1) + "-" +
-          pad2(today.getDate());
       }
     } catch (error) {
       baseUrlInput.value = safeOriginBaseUrl();
-      today = new Date();
-      tradeDateInput.value = today.getFullYear() + "-" +
-        pad2(today.getMonth() + 1) + "-" +
-        pad2(today.getDate());
     }
   }
 
